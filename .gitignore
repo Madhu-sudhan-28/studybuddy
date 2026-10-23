@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+studybuddy.sqlite3
+studybuddy.sqlite3-shm
+studybuddy.sqlite3-wal
