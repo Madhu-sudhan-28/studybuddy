@@ -391,9 +391,10 @@ async function openStudyHistory(historyId) {
 async function loadSignedInSession() {
   try {
     const response = await fetch("/api/auth/session", { cache: "no-store" });
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
     if (response.ok && result.authenticated) await enterApp(result.user, result.progress);
     else if (response.ok) setAuthMode(result.hasAccounts ? "login" : "register");
+    else authError.textContent = result.error || FRIENDLY_ERROR;
   } catch (error) {
     console.error("Could not check the StudyBuddy account session.", error);
     authError.textContent = FRIENDLY_ERROR;
@@ -1853,14 +1854,18 @@ authForm.addEventListener("submit", async (event) => {
         password: document.querySelector("#auth-password").value,
       }),
     });
-    const result = await response.json();
-    if (!response.ok) throw new Error(FRIENDLY_ERROR);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
     document.querySelector("#auth-password").value = "";
-    const session = await fetch("/api/auth/session", { cache: "no-store" }).then((res) => res.json());
+    const sessionResponse = await fetch("/api/auth/session", { cache: "no-store" });
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok) throw new Error(session.error || FRIENDLY_ERROR);
     await enterApp(session.user || result.user, session.progress);
   } catch (error) {
     console.error("Could not complete account request.", error);
-    authError.textContent = FRIENDLY_ERROR;
+    authError.textContent = error instanceof Error && error.message !== "Failed to fetch"
+      ? error.message
+      : FRIENDLY_ERROR;
   } finally {
     submit.disabled = false;
     submit.textContent = originalText;

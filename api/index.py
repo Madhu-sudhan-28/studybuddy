@@ -1,9 +1,11 @@
 """Vercel entrypoint for StudyBuddy's existing HTTP request handler."""
 
 import threading
+import sys
+import traceback
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from server import StudyBuddyHandler, initialize_database
+from server import StudyBuddyHandler, initialize_database, send_json
 
 
 _database_initialized = False
@@ -18,6 +20,17 @@ def ensure_database_initialized():
         if not _database_initialized:
             initialize_database()
             _database_initialized = True
+
+
+def try_initialize_database(handler):
+    try:
+        ensure_database_initialized()
+        return True
+    except Exception:
+        print("StudyBuddy database initialization failed.", file=sys.stderr)
+        traceback.print_exc()
+        send_json(handler, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+        return False
 
 
 class handler(StudyBuddyHandler):
@@ -38,7 +51,8 @@ class handler(StudyBuddyHandler):
         self.restore_api_path()
         path = urlsplit(self.path).path
         if path in {"/api/auth/session", "/api/history"} or path.startswith("/api/history/"):
-            ensure_database_initialized()
+            if not try_initialize_database(self):
+                return
         super().do_GET()
 
     def do_POST(self):
@@ -54,5 +68,6 @@ class handler(StudyBuddyHandler):
             "/api/generate-quiz",
             "/api/explain-part",
         }:
-            ensure_database_initialized()
+            if not try_initialize_database(self):
+                return
         super().do_POST()

@@ -73,6 +73,14 @@ def is_database_integrity_error(error):
         return False
 
 
+def is_database_connection_error(error):
+    try:
+        import psycopg
+        return isinstance(error, psycopg.OperationalError)
+    except ImportError:
+        return False
+
+
 class DatabaseConnection:
     """Adapt the server's parameter markers to PostgreSQL's DB-API syntax."""
 
@@ -515,6 +523,9 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 send_json(self, 409, {"error": "An account with that email already exists. Sign in instead."})
             elif isinstance(error, ValueError):
                 send_json(self, 400, {"error": str(error)})
+            elif is_database_connection_error(error):
+                print("Account registration could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
             else:
                 raise
 
@@ -532,8 +543,11 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 raise ValueError("Enter your email and password.")
             with database_connection() as connection:
                 user = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
-                if not user or not verify_password(password, user["password_hash"]):
-                    send_json(self, 401, {"error": "Email or password is incorrect."})
+                if not user:
+                    send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
+                    return
+                if not verify_password(password, user["password_hash"]):
+                    send_json(self, 401, {"error": "That password is incorrect. Please try again."})
                     return
                 now = int(time.time())
                 token = secrets.token_urlsafe(32)
@@ -542,8 +556,14 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     (hashlib.sha256(token.encode()).hexdigest(), user["id"], now + SESSION_TTL_SECONDS),
                 )
             send_json(self, 200, {"user": {"email": user["email"]}}, {"Set-Cookie": self.session_cookie_value(token)})
-        except ValueError as error:
-            send_json(self, 400, {"error": str(error)})
+        except Exception as error:
+            if isinstance(error, ValueError):
+                send_json(self, 400, {"error": str(error)})
+            elif is_database_connection_error(error):
+                print("Account sign-in could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
 
     def logout_account(self):
         token = session_token_from(self)
