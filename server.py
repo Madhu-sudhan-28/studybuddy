@@ -1196,6 +1196,10 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
         send_json(self, 200, {"explanation": explanation})
 
 
+# Vercel's Python runtime looks for a top-level handler class.
+handler = StudyBuddyHandler
+
+
 def main():
     if sys.stdout is None or sys.stderr is None:
         log_file = (Path(tempfile.gettempdir()) / "studybuddy-server.log").open("a", encoding="utf-8")
