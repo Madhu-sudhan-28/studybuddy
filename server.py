@@ -134,7 +134,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS study_progress (
                 user_id {user_id_type} PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                 progress_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at BIGINT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS study_history (
                 id {id_type},
@@ -154,6 +154,12 @@ def initialize_database():
                 attempts INTEGER NOT NULL DEFAULT 0
             );
         """)
+        updated_at_column = connection.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'study_progress' AND column_name = 'updated_at'"
+        ).fetchone()
+        if updated_at_column and updated_at_column["data_type"] != "bigint":
+            connection.execute("ALTER TABLE study_progress ALTER COLUMN updated_at TYPE BIGINT")
 
 
 def hash_password(password, salt=None):
