@@ -21,6 +21,7 @@ const authError = document.querySelector("#auth-error");
 const FRIENDLY_ERROR = "Something went wrong. Please try again.";
 let authMode = "login";
 let signedIn = false;
+let signedInEmail = "";
 let currentView = "home";
 let saveTimer;
 let progressRevision = Date.now();
@@ -242,8 +243,7 @@ function saveProgress(immediate = false) {
   clearTimeout(saveTimer);
   const snapshot = progressSnapshot();
   try {
-    const email = document.querySelector("#profile-email").textContent.trim().toLowerCase();
-    if (email) localStorage.setItem(`studybuddy-progress:${email}`, JSON.stringify(snapshot));
+    if (signedInEmail) localStorage.setItem(`studybuddy-progress:${signedInEmail}`, JSON.stringify(snapshot));
   } catch (error) {
     console.warn("Could not cache study progress in this browser.", error);
   }
@@ -478,7 +478,7 @@ async function enterApp(user, progress) {
   signedIn = true;
   authGate.hidden = true;
   appShell.hidden = false;
-  document.querySelector("#profile-email").textContent = user.email;
+  signedInEmail = user.email.trim().toLowerCase();
   resetStudyState();
   let browserProgress = null;
   try {
@@ -2365,6 +2365,7 @@ document.querySelector("#sign-out").addEventListener("click", async () => {
   await saveProgress(true);
   await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
   signedIn = false;
+  signedInEmail = "";
   resetStudyState();
   sessionStorage.removeItem("studybuddy-session");
   appShell.hidden = true;
@@ -2377,8 +2378,7 @@ window.addEventListener("pagehide", () => {
   const snapshot = progressSnapshot();
   const body = JSON.stringify({ progress: snapshot });
   try {
-    const email = document.querySelector("#profile-email").textContent.trim().toLowerCase();
-    if (email) localStorage.setItem(`studybuddy-progress:${email}`, JSON.stringify(snapshot));
+    if (signedInEmail) localStorage.setItem(`studybuddy-progress:${signedInEmail}`, JSON.stringify(snapshot));
   } catch (error) {
     console.warn("Could not cache study progress during refresh.", error);
   }
