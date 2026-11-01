@@ -764,6 +764,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     (user["id"],),
                 ).fetchone()
                 archived = False
+                history_added = False
                 if previous and saved_at >= previous["updated_at"]:
                     try:
                         previous_progress = json.loads(previous["progress_json"])
@@ -784,11 +785,24 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "WHERE excluded.updated_at >= study_progress.updated_at",
                     (user["id"], progress_json, saved_at),
                 )
+                if not previous or saved_at >= previous["updated_at"]:
+                    plan_id = progress.get("planId")
+                    if isinstance(plan_id, str) and plan_id.strip():
+                        existing_history = connection.execute(
+                            "SELECT 1 FROM study_history WHERE user_id = ? AND plan_id = ?",
+                            (user["id"], plan_id),
+                        ).fetchone()
+                        connection.execute(
+                            "INSERT INTO study_history(user_id, plan_id, progress_json, created_at) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(user_id, plan_id) DO UPDATE SET progress_json=excluded.progress_json",
+                            (user["id"], plan_id, progress_json, now),
+                        )
+                        history_added = existing_history is None
                 connection.execute(
                     "UPDATE login_sessions SET expires_at = ? WHERE token_hash = ?",
                     (now + SESSION_TTL_SECONDS, hashlib.sha256(session_token_from(self).encode("ascii", errors="ignore")).hexdigest()),
                 )
-            send_json(self, 200, {"ok": True, "archived": archived})
+            send_json(self, 200, {"ok": True, "archived": archived, "historyAdded": history_added})
         except ValueError as error:
             send_json(self, 400, {"error": str(error)})
 

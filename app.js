@@ -254,7 +254,7 @@ function saveProgress(immediate = false) {
   }).then(async (response) => {
     if (!response.ok) throw new Error(`Progress save failed (${response.status}).`);
     const result = await response.json();
-    if (result.archived) await loadStudyHistory();
+    if (result.archived || result.historyAdded) await loadStudyHistory();
   }).catch((error) => console.error("Could not save study progress.", error));
   if (immediate) return save();
   saveTimer = setTimeout(save, 450);
@@ -493,8 +493,8 @@ async function enterApp(user, progress) {
   }
   progressRevision = Math.max(progressRevision, Number(progress?.savedAt) || 0);
   let hasSavedProgress = restoreProgress(progress);
-  if (hasSavedProgress && (restoredBrowserCopy || progress?.material !== state.material || progress?.lessonVersion !== 20 || typeof progress?.inputMaterial !== "string" || cleanExtractedStudyText(cleanLegacyImageInput(progress.inputMaterial)) !== progress.inputMaterial)) {
-    saveProgress(true);
+  if (hasSavedProgress) {
+    await saveProgress(true);
   }
   if (!hasSavedProgress) {
     try {
@@ -503,7 +503,7 @@ async function enterApp(user, progress) {
     } catch (error) {
       console.error("Could not read the older browser session.", error);
     }
-    if (hasSavedProgress) saveProgress(true);
+    if (hasSavedProgress) await saveProgress(true);
   }
   sessionStorage.removeItem("studybuddy-session");
   await loadStudyHistory();
