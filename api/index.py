@@ -50,7 +50,12 @@ class handler(StudyBuddyHandler):
     def do_GET(self):
         self.restore_api_path()
         path = urlsplit(self.path).path
-        if path in {"/api/auth/session", "/api/history"} or path.startswith("/api/history/"):
+        if path in {
+            "/api/auth/session",
+            "/api/auth/google/start",
+            "/api/auth/google/callback",
+            "/api/history",
+        } or path.startswith("/api/history/"):
             if not try_initialize_database(self):
                 return
         super().do_GET()
@@ -59,11 +64,8 @@ class handler(StudyBuddyHandler):
         self.restore_api_path()
         path = urlsplit(self.path).path
         if path in {
-            "/api/auth/register",
             "/api/auth/login",
             "/api/auth/logout",
-            "/api/auth/password-reset/request",
-            "/api/auth/password-reset/confirm",
             "/api/progress",
             "/api/extract-image",
             "/api/generate-lesson",

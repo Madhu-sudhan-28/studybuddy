@@ -1,6 +1,5 @@
 import base64
 from contextlib import contextmanager
-from email.message import EmailMessage
 import hashlib
 import hmac
 import json
@@ -8,8 +7,6 @@ import os
 import random
 import re
 import secrets
-import smtplib
-import ssl
 import sys
 import tempfile
 import threading
@@ -40,15 +37,15 @@ MAX_FOLLOW_UP_QUESTION_CHARS = 2000
 MAX_IMAGE_OUTPUT_TOKENS = 1800
 ENV_FILE = ROOT / ".env"
 DATABASE_URL_NAME = "DATABASE_URL"
+GOOGLE_CLIENT_ID_NAME = "GOOGLE_CLIENT_ID"
+GOOGLE_CLIENT_SECRET_NAME = "GOOGLE_CLIENT_SECRET"
+GOOGLE_REDIRECT_URI_NAME = "GOOGLE_REDIRECT_URI"
 AUTH_COOKIE = "studybuddy_session"
+GOOGLE_OAUTH_COOKIE = "studybuddy_google_oauth"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+GOOGLE_OAUTH_TTL_SECONDS = 10 * 60
 MAX_PROGRESS_BYTES = 8 * 1024 * 1024
 PASSWORD_ITERATIONS = 310_000
-RESET_CODE_TTL_SECONDS = 10 * 60
-RESET_CODE_RESEND_SECONDS = 60
-RESET_CODE_MAX_ATTEMPTS = 5
-RESET_CODE_HASH_ITERATIONS = 120_000
-PASSWORD_RESET_EMAIL = "If that email matches a StudyBuddy account, a verification code has been sent."
 
 
 @contextmanager
@@ -71,14 +68,6 @@ def database_connection():
         connection.commit()
     finally:
         connection.close()
-
-
-def is_database_integrity_error(error):
-    try:
-        import psycopg
-        return isinstance(error, psycopg.IntegrityError)
-    except ImportError:
-        return False
 
 
 def is_database_connection_error(error):
@@ -145,14 +134,6 @@ def initialize_database():
                 UNIQUE(user_id, plan_id)
             );
             CREATE INDEX IF NOT EXISTS study_history_user_created ON study_history(user_id, created_at DESC);
-            CREATE TABLE IF NOT EXISTS password_reset_codes (
-                email TEXT PRIMARY KEY REFERENCES users(email) ON DELETE CASCADE,
-                salt TEXT NOT NULL,
-                code_hash TEXT NOT NULL,
-                expires_at INTEGER NOT NULL,
-                last_sent_at INTEGER NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0
-            );
         """)
         updated_at_column = connection.execute(
             "SELECT data_type FROM information_schema.columns "
@@ -209,6 +190,85 @@ def origin_is_same_site(handler):
     return parsed.scheme in {"http", "https"} and parsed.netloc.casefold() == host.casefold()
 
 
+def google_oauth_settings():
+    client_id = os.environ.get(GOOGLE_CLIENT_ID_NAME, "").strip()
+    client_secret = os.environ.get(GOOGLE_CLIENT_SECRET_NAME, "").strip()
+    redirect_uri = os.environ.get(GOOGLE_REDIRECT_URI_NAME, "").strip()
+    if not client_id or not client_secret or not redirect_uri:
+        raise RuntimeError("Google sign-in is not configured.")
+    parsed_redirect = urllib.parse.urlsplit(redirect_uri)
+    if (
+        parsed_redirect.scheme not in {"https", "http"}
+        or not parsed_redirect.netloc
+        or parsed_redirect.path != "/api/auth/google/callback"
+        or parsed_redirect.query
+        or parsed_redirect.fragment
+        or (parsed_redirect.scheme == "http" and parsed_redirect.hostname not in {"localhost", "127.0.0.1"})
+    ):
+        raise RuntimeError("Google sign-in is configured incorrectly.")
+    return client_id, client_secret, redirect_uri
+
+
+def set_cookie(handler, name, value, max_age, path):
+    secure = "; Secure" if handler.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https" else ""
+    return f"{name}={value}; Path={path}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+
+
+def send_redirect(handler, location, cookies=()):
+    handler.send_response(303)
+    handler.send_header("Location", location)
+    handler.send_header("Cache-Control", "no-store")
+    for cookie in cookies:
+        handler.send_header("Set-Cookie", cookie)
+    handler.end_headers()
+
+
+def google_oauth_cookie(handler):
+    for cookie in handler.headers.get("Cookie", "").split(";"):
+        name, separator, value = cookie.strip().partition("=")
+        if separator and name == GOOGLE_OAUTH_COOKIE:
+            return value
+    return ""
+
+
+def exchange_google_authorization_code(code, code_verifier, client_id, client_secret, redirect_uri):
+    payload = urllib.parse.urlencode({
+        "code": code,
+        "code_verifier": code_verifier,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }).encode("ascii")
+    request = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.loads(response.read(32_768))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError) as error:
+        raise RuntimeError("Google sign-in could not be completed. Please try again.") from error
+    token = result.get("id_token") if isinstance(result, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Google did not return a valid sign-in token.")
+    return token
+
+
+def verify_google_id_token(token, client_id):
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import id_token
+    except ImportError as error:
+        raise RuntimeError("Google sign-in dependencies are missing. Install requirements.txt.") from error
+    try:
+        return id_token.verify_oauth2_token(token, Request(), client_id)
+    except (ValueError, KeyError) as error:
+        raise RuntimeError("Google sign-in could not be verified. Please try again.") from error
+
+
 def lesson_detail_profile(minutes):
     return MAX_LESSON_OUTPUT_TOKENS
 
@@ -252,54 +312,19 @@ def load_local_env():
         name, value = entry.split("=", 1)
         name = name.strip()
         value = value.strip().strip("'\"")
-        if name in {API_KEY_NAME, DATABASE_URL_NAME, "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"} and value:
+        if name in {
+            API_KEY_NAME,
+            DATABASE_URL_NAME,
+            GOOGLE_CLIENT_ID_NAME,
+            GOOGLE_CLIENT_SECRET_NAME,
+            GOOGLE_REDIRECT_URI_NAME,
+        } and value:
             if name != API_KEY_NAME or value != "paste-your-groq-api-key-here":
                 os.environ.setdefault(name, value)
 
 
 def get_api_key():
     return os.environ.get(API_KEY_NAME, "").strip()
-
-
-def password_reset_email_settings():
-    host = os.environ.get("SMTP_HOST", "").strip()
-    port_text = os.environ.get("SMTP_PORT", "587").strip()
-    username = os.environ.get("SMTP_USER", "").strip()
-    password = os.environ.get("SMTP_PASSWORD", "")
-    sender = os.environ.get("SMTP_FROM", "").strip() or username
-    if not host or not sender or not username or not password:
-        raise RuntimeError("Password reset email is not configured on this server. Contact the site administrator.")
-    try:
-        port = int(port_text)
-    except ValueError as error:
-        raise RuntimeError("Password reset email is not configured correctly. Contact the site administrator.") from error
-    if not 1 <= port <= 65535:
-        raise RuntimeError("Password reset email is not configured correctly. Contact the site administrator.")
-    return host, port, username, password, sender
-
-
-def send_password_reset_email(email, code):
-    host, port, username, password, sender = password_reset_email_settings()
-    message = EmailMessage()
-    message["Subject"] = "Your StudyBuddy password reset code"
-    message["From"] = sender
-    message["To"] = email
-    message.set_content(
-        f"Your StudyBuddy password reset code is {code}.\n\n"
-        f"It expires in {RESET_CODE_TTL_SECONDS // 60} minutes. If you did not request this, you can ignore this email."
-    )
-    context = ssl.create_default_context()
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as client:
-            client.login(username, password)
-            client.send_message(message)
-    else:
-        with smtplib.SMTP(host, port, timeout=20) as client:
-            client.ehlo()
-            client.starttls(context=context)
-            client.ehlo()
-            client.login(username, password)
-            client.send_message(message)
 
 
 def send_json(handler, status, payload, headers=None):
@@ -471,6 +496,12 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
         ):
             send_json(self, 404, {"error": "Not found."})
             return
+        if request_path == "/api/auth/google/start":
+            self.start_google_auth()
+            return
+        if request_path == "/api/auth/google/callback":
+            self.complete_google_auth()
+            return
         if request_path == "/api/auth/session":
             with database_connection() as connection:
                 token = session_token_from(self)
@@ -573,43 +604,104 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             raise ValueError("The request data is invalid.")
         return payload
 
-    def register_account(self):
+    def session_cookie_value(self, token, max_age=SESSION_TTL_SECONDS):
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https" else ""
+        return f"{AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+
+    def start_google_auth(self):
         try:
-            payload = self.read_json_body(4096)
-            raw_email = payload.get("email", "")
-            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
-            password = payload.get("password", "")
-            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
-                raise ValueError("Enter a valid email address.")
-            if not isinstance(password, str) or len(password) < 10 or len(password) > 256:
-                raise ValueError("Use a password between 10 and 256 characters.")
+            client_id, _, redirect_uri = google_oauth_settings()
+        except RuntimeError as error:
+            print(f"Google sign-in unavailable: {error}", file=sys.stderr)
+            send_redirect(self, "/?auth_error=google_not_configured")
+            return
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+        query = urllib.parse.urlencode({
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        })
+        cookie_value = f"{state}.{nonce}.{verifier}"
+        cookie = set_cookie(
+            self,
+            GOOGLE_OAUTH_COOKIE,
+            cookie_value,
+            GOOGLE_OAUTH_TTL_SECONDS,
+            "/api/auth/google",
+        )
+        send_redirect(
+            self,
+            f"https://accounts.google.com/o/oauth2/v2/auth?{query}",
+            (cookie,),
+        )
+
+    def complete_google_auth(self):
+        cookie = google_oauth_cookie(self)
+        clear_cookie = set_cookie(self, GOOGLE_OAUTH_COOKIE, "", 0, "/api/auth/google")
+        values = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+        if values.get("error"):
+            send_redirect(self, "/?auth_error=google_cancelled", (clear_cookie,))
+            return
+        state = values.get("state", [""])[0]
+        code = values.get("code", [""])[0]
+        cookie_parts = cookie.split(".")
+        if (
+            len(cookie_parts) != 3
+            or not state
+            or not code
+            or not hmac.compare_digest(cookie_parts[0], state)
+        ):
+            send_redirect(self, "/?auth_error=google_invalid_state", (clear_cookie,))
+            return
+        try:
+            client_id, client_secret, redirect_uri = google_oauth_settings()
+            identity_token = exchange_google_authorization_code(
+                code, cookie_parts[2], client_id, client_secret, redirect_uri
+            )
+            claims = verify_google_id_token(identity_token, client_id)
+            email = claims.get("email", "")
+            if (
+                not isinstance(email, str)
+                or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)
+                or claims.get("email_verified") is not True
+                or not isinstance(claims.get("sub"), str)
+                or not hmac.compare_digest(str(claims.get("nonce", "")), cookie_parts[1])
+            ):
+                raise RuntimeError("Google did not confirm a verified email for this account.")
+            email = email.strip().casefold()
             now = int(time.time())
+            token = secrets.token_urlsafe(32)
             with database_connection() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?) RETURNING id",
-                    (email, hash_password(password), now),
-                )
-                user_id = cursor.fetchone()["id"]
-                token = secrets.token_urlsafe(32)
+                user = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+                if user:
+                    user_id = user["id"]
+                else:
+                    cursor = connection.execute(
+                        "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(email) DO UPDATE SET email = excluded.email RETURNING id",
+                        (email, hash_password(secrets.token_urlsafe(48)), now),
+                    )
+                    user_id = cursor.fetchone()["id"]
                 connection.execute(
                     "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
                     (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
                 )
-            send_json(self, 201, {"user": {"email": email}}, {"Set-Cookie": self.session_cookie_value(token)})
+            send_redirect(
+                self,
+                "/",
+                (clear_cookie, self.session_cookie_value(token)),
+            )
         except Exception as error:
-            if is_database_integrity_error(error):
-                send_json(self, 409, {"error": "An account with that email already exists. Sign in instead."})
-            elif isinstance(error, ValueError):
-                send_json(self, 400, {"error": str(error)})
-            elif is_database_connection_error(error):
-                print("Account registration could not connect to the database.", file=sys.stderr)
-                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
-            else:
-                raise
-
-    def session_cookie_value(self, token, max_age=SESSION_TTL_SECONDS):
-        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https" else ""
-        return f"{AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+            print(f"Google sign-in failed: {type(error).__name__}", file=sys.stderr)
+            send_redirect(self, "/?auth_error=google_failed", (clear_cookie,))
 
     def login_account(self):
         try:
@@ -622,7 +714,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             with database_connection() as connection:
                 user = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
                 if not user:
-                    send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
+                    send_json(self, 401, {"error": "No existing account was found for that email. Check the address or wait for Google sign-in setup to create an account."})
                     return
                 if not verify_password(password, user["password_hash"]):
                     send_json(self, 401, {"error": "That password is incorrect. Please try again."})
@@ -639,117 +731,6 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 send_json(self, 400, {"error": str(error)})
             elif is_database_connection_error(error):
                 print("Account sign-in could not connect to the database.", file=sys.stderr)
-                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
-            else:
-                raise
-
-    def request_password_reset(self):
-        try:
-            password_reset_email_settings()
-            payload = self.read_json_body(4096)
-            raw_email = payload.get("email", "")
-            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
-            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
-                raise ValueError("Enter a valid email address.")
-            now = int(time.time())
-            code = f"{secrets.randbelow(100_000_000):08d}"
-            salt = secrets.token_hex(16)
-            code_hash = hashlib.pbkdf2_hmac(
-                "sha256", code.encode("ascii"), bytes.fromhex(salt), RESET_CODE_HASH_ITERATIONS
-            ).hex()
-            should_send = False
-            with database_connection() as connection:
-                user = connection.execute("SELECT email FROM users WHERE email = ?", (email,)).fetchone()
-                if user:
-                    existing = connection.execute(
-                        "SELECT last_sent_at FROM password_reset_codes WHERE email = ?", (email,)
-                    ).fetchone()
-                    if not existing or now - existing["last_sent_at"] >= RESET_CODE_RESEND_SECONDS:
-                        connection.execute(
-                            "INSERT INTO password_reset_codes(email, salt, code_hash, expires_at, last_sent_at, attempts) "
-                            "VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET "
-                            "salt = excluded.salt, code_hash = excluded.code_hash, expires_at = excluded.expires_at, "
-                            "last_sent_at = excluded.last_sent_at, attempts = 0",
-                            (email, salt, code_hash, now + RESET_CODE_TTL_SECONDS, now),
-                        )
-                        should_send = True
-            if should_send:
-                try:
-                    send_password_reset_email(email, code)
-                except Exception as error:
-                    print(f"Password reset email delivery failed: {type(error).__name__}", file=sys.stderr)
-                    with database_connection() as connection:
-                        connection.execute(
-                            "DELETE FROM password_reset_codes WHERE email = ? AND code_hash = ?", (email, code_hash)
-                        )
-                    send_json(self, 502, {"error": "StudyBuddy could not send the verification email. Please try again later."})
-                    return
-            send_json(self, 200, {"message": PASSWORD_RESET_EMAIL})
-        except ValueError as error:
-            send_json(self, 400, {"error": str(error)})
-        except RuntimeError as error:
-            if "Password reset email" in str(error):
-                send_json(self, 503, {"error": str(error)})
-            else:
-                raise
-        except Exception as error:
-            if is_database_connection_error(error):
-                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
-            else:
-                raise
-
-    def confirm_password_reset(self):
-        try:
-            payload = self.read_json_body(4096)
-            raw_email = payload.get("email", "")
-            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
-            code = payload.get("code", "")
-            password = payload.get("password", "")
-            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
-                raise ValueError("Enter a valid email address.")
-            if not isinstance(code, str) or not re.fullmatch(r"\d{8}", code):
-                raise ValueError("Enter the 8-digit code from your email.")
-            if not isinstance(password, str) or len(password) < 10 or len(password) > 256:
-                raise ValueError("Use a password between 10 and 256 characters.")
-            now = int(time.time())
-            reset_error = None
-            with database_connection() as connection:
-                reset = connection.execute(
-                    "SELECT salt, code_hash, expires_at, attempts FROM password_reset_codes WHERE email = ?",
-                    (email,),
-                ).fetchone()
-                if not reset or reset["expires_at"] <= now or reset["attempts"] >= RESET_CODE_MAX_ATTEMPTS:
-                    connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
-                    reset_error = "That code has expired or is invalid. Request a new code and try again."
-                elif not hmac.compare_digest(
-                    hashlib.pbkdf2_hmac(
-                        "sha256", code.encode("ascii"), bytes.fromhex(reset["salt"]), RESET_CODE_HASH_ITERATIONS
-                    ).hex(),
-                    reset["code_hash"],
-                ):
-                    attempts = reset["attempts"] + 1
-                    if attempts >= RESET_CODE_MAX_ATTEMPTS:
-                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
-                    else:
-                        connection.execute("UPDATE password_reset_codes SET attempts = ? WHERE email = ?", (attempts, email))
-                    reset_error = "That code is incorrect or expired. Check your email and try again."
-                else:
-                    user = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-                    if not user:
-                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
-                        reset_error = "That code has expired or is invalid. Request a new code and try again."
-                    else:
-                        connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), user["id"]))
-                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
-                        connection.execute("DELETE FROM login_sessions WHERE user_id = ?", (user["id"],))
-            if reset_error:
-                send_json(self, 400, {"error": reset_error})
-                return
-            send_json(self, 200, {"message": "Your password has been reset. Sign in with your new password."})
-        except ValueError as error:
-            send_json(self, 400, {"error": str(error)})
-        except Exception as error:
-            if is_database_connection_error(error):
                 send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
             else:
                 raise
@@ -829,23 +810,28 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        if path in {"/api/auth/register", "/api/auth/register/confirm"}:
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                send_json(self, 410, {"error": "Create a new account with Google sign-in."})
+            return
+        if path in {"/api/auth/password-reset/request", "/api/auth/password-reset/confirm"}:
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                send_json(self, 410, {"error": "Password recovery is unavailable for password-only accounts. Sign in with Google if your account is linked."})
+            return
         if path in {
-            "/api/auth/register", "/api/auth/login", "/api/auth/logout",
-            "/api/auth/password-reset/request", "/api/auth/password-reset/confirm", "/api/progress",
+            "/api/auth/login", "/api/auth/logout", "/api/progress",
         }:
             if not origin_is_same_site(self):
                 send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
                 return
-            if path == "/api/auth/register":
-                self.register_account()
-            elif path == "/api/auth/login":
+            if path == "/api/auth/login":
                 self.login_account()
             elif path == "/api/auth/logout":
                 self.logout_account()
-            elif path == "/api/auth/password-reset/request":
-                self.request_password_reset()
-            elif path == "/api/auth/password-reset/confirm":
-                self.confirm_password_reset()
             else:
                 self.save_progress()
             return
@@ -965,18 +951,17 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             if not isinstance(topics, list) or not 1 <= len(topics) <= MAX_QUIZ_TOPICS:
                 raise ValueError(f"The quiz needs between 1 and {MAX_QUIZ_TOPICS} learned topics.")
             quiz_mode = request_data.get("mode", "initial")
-            if quiz_mode not in {"initial", "revision", "single", "problem"}:
+            if quiz_mode not in {"initial", "single", "problem"}:
                 raise ValueError("The quiz mode is invalid.")
-            expected_count = len(topics) + 1 if quiz_mode == "initial" else 1 if quiz_mode in {"single", "problem"} else request_data.get("questionCount")
+            expected_count = len(topics) + 1 if quiz_mode == "initial" else 1
             if (
                 isinstance(expected_count, bool)
                 or not isinstance(expected_count, int)
                 or not 1 <= expected_count <= MAX_QUIZ_TOPICS + (1 if quiz_mode == "initial" else 0)
-                or (quiz_mode == "revision" and expected_count != len(topics))
                 or (quiz_mode in {"single", "problem"} and (len(topics) != 1 or request_data.get("questionCount") != 1))
                 or (quiz_mode == "initial" and request_data.get("questionCount") != expected_count)
             ):
-                raise ValueError("The follow-up quiz must have one question for each reviewed topic.")
+                raise ValueError("The quiz request has an invalid question count.")
             quiz_topics = []
             for index, item in enumerate(topics):
                 if not isinstance(item, dict) or not isinstance(item.get("title"), str):
@@ -986,7 +971,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     raise ValueError("A quiz topic index is invalid. Rebuild your study plan.")
                 lesson = item.get("lesson")
                 if not isinstance(lesson, dict):
-                    if quiz_mode not in {"single", "problem", "revision"} or not isinstance(item.get("content"), str) or not item["content"].strip():
+                    if quiz_mode not in {"single", "problem"} or not isinstance(item.get("content"), str) or not item["content"].strip():
                         raise ValueError("Complete each lesson before starting the quiz.")
                     lesson = {}
                 sections = lesson.get("detailedSections", [])
@@ -1016,22 +1001,11 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     ],
                     "workedExample": str(lesson.get("workedExample", ""))[:400],
                 })
-            if quiz_mode == "revision" and len({topic["topicIndex"] for topic in quiz_topics}) != len(quiz_topics):
-                raise ValueError("A follow-up quiz cannot repeat a reviewed topic.")
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as error:
             send_json(self, 400, {"error": str(error) or "The quiz request is invalid."})
             return
 
-        if quiz_mode == "revision":
-            prompt = (
-                "Write a focused follow-up quiz using only the supplied lesson summaries for topics "
-                "the learner just reviewed. Return exactly one new multiple-choice question for each "
-                "supplied topic in the current batch, in topic order, with no applied problem. This quiz checks whether the "
-                "learner understood the explanations, so test the underlying concept with a fresh question "
-                "that is not copied from an earlier quiz question. Assign each question the zero-based "
-                "topicIndex shown in its supplied lesson. "
-            )
-        elif quiz_mode == "single":
+        if quiz_mode == "single":
             prompt = (
                 "Write exactly one useful multiple-choice question from the one supplied lesson. Test its "
                 "main idea or an important detail and assign the supplied zero-based topicIndex. "
@@ -1043,7 +1017,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 "Write a useful exam-style assessment using only the supplied StudyBuddy lesson summaries. "
                 "Write one multiple-choice question for every supplied topic in the current batch, in topic order. "
             )
-        if quiz_mode in {"revision", "single"}:
+        if quiz_mode == "single":
             prompt += (
                 "Write a direct, specific question about the lesson's concepts, facts, mechanisms, examples, "
                 "or trade-offs. Never use meta-questions or generic filler. Give four distinct options: exactly "
@@ -1076,13 +1050,13 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 "under 45 words. "
             )
         questions = []
-        batch_size = 1 if quiz_mode in {"single", "revision", "problem"} else 5
+        batch_size = 1 if quiz_mode in {"single", "problem"} else 5
         try:
             for start in range(0, len(quiz_topics), batch_size):
                 topic_batch = quiz_topics[start : start + batch_size]
                 has_applied_problem = quiz_mode == "problem" or (quiz_mode == "initial" and start + batch_size >= len(quiz_topics))
                 batch_expected_count = 1 if quiz_mode == "problem" else len(topic_batch) + (1 if has_applied_problem else 0)
-                if quiz_mode in {"revision", "single"}:
+                if quiz_mode == "single":
                     batch_schema = (
                         "Return only compact JSON with this schema and no extra keys:\n"
                         "{\"questions\":[{\"type\":\"mcq\",\"topicIndex\":0,\"prompt\":\"...\","
@@ -1292,7 +1266,13 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 "Do not skip a step needed to understand the topic. "
             )
             return (
-                "Teach only the selected topic to a beginner in a concise but detailed lesson. "
+                "You are StudyBuddy, a tutor focused exclusively on education and learning. The learner may enter "
+                "a full set of notes, a short question, or just a topic name. Teach an educational topic directly, "
+                "using reliable standard subject knowledge when a short prompt does not provide enough detail; "
+                "when detailed notes are supplied, prioritize them and do not contradict them. Distinguish general "
+                "background from facts specific to the learner's course. If the request is clearly unrelated to "
+                "education, briefly explain that StudyBuddy focuses on learning and invite an education-related "
+                "question. Teach the selected educational topic to a beginner in a concise but detailed lesson. "
                 f"Write about {word_limit} words (never exceed the limit). {structure}"
                 "Ignore document metadata such as department or school headers, institution names, addresses, contact details, "
                 "page numbers, file labels, and copyright lines. Do not repeat or teach that metadata; focus on useful study content. "
@@ -1301,7 +1281,9 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 "short, complete sentences and stay under 25 words. Split long steps and examples across multiple "
                 "bullets. Do not put a whole paragraph inside one bullet. Prefer clear, natural wording and explain "
                 "technical words on first use. Include only details that help the learner understand this topic. "
-                "Treat the notes as the factual source; do not add unsupported course facts. "
+                "Treat detailed notes as the primary source; do not invent facts specific to the learner's course. "
+                "Use standard educational knowledge to explain short prompts and clearly distinguish general "
+                "background from course-specific material. "
                 f"{('For this shorter fallback, set visual to null.' if compact else 'Include a visual only when it would make the idea easier to understand: use a flowchart for a process or sequence, or a concept map for connected ideas. For other topics set visual to null. ')}"
                 "Return one valid JSON object only, with keys content and visual. The content value must be the "
                 "bullet-point lesson as a string. A flowchart visual must have kind=flowchart, a title, and 3-7 "
@@ -1401,12 +1383,15 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             return
 
         prompt = (
-            "You are a patient subject tutor. Answer the learner's specific question about this study topic "
+            "You are StudyBuddy, a patient tutor focused exclusively on education and learning. Answer the "
+            "learner's specific educational question about this study topic "
             "in clear, beginner-friendly detail, as a helpful ChatGPT-style explanation. Define necessary "
             "terms, explain the reasoning step by step, and include a worked example or analogy when it helps. "
-            "Stay focused on the requested point, use the source as the primary reference, and do "
-            "not invent details that are not supported. If the source does not contain enough information, "
-            "say so plainly and distinguish any standard background you add. Aim for 150-250 words when the "
+            "Stay focused on the requested point and use detailed source notes as the primary reference. If the "
+            "source is only a short topic name or does not contain enough information, answer using reliable "
+            "standard educational knowledge and distinguish general background from course-specific facts. "
+            "If the request is clearly unrelated to education, briefly explain that StudyBuddy focuses on "
+            "learning and invite an education-related question. Aim for 150-250 words when the "
             "question needs that much explanation; be shorter for a simple question and do not repeat the whole "
             "lesson. Use short paragraphs and plain text only.\n\n"
             f"Topic:\n{topic}\n\n"

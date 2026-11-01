@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f7f7f2" />
     <meta
       name="description"
-      content="Turn your study material into a personal plan, guided lessons, and a smarter revision routine."
+      content="Ask education questions or study any topic with guided lessons, practice, and a personal learning plan."
     />
     <title>StudyBuddy — learn it your way</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -24,37 +24,19 @@
       <form class="auth-card" id="auth-form">
         <p class="eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL LEARNING SPACE</p>
         <h1 id="auth-title">Welcome <span class="serif-accent">back.</span></h1>
-        <p class="auth-copy" id="auth-copy">Sign in to continue your study plan from any device.</p>
+        <p class="auth-copy" id="auth-copy">Sign in or create an account with Google, or use an existing password account.</p>
+        <a class="google-sign-in" id="google-sign-in" href="/api/auth/google/start">
+          <span class="google-mark" aria-hidden="true">G</span>
+          <span>Continue with Google</span>
+        </a>
+        <div class="auth-divider"><span>OR SIGN IN WITH PASSWORD</span></div>
         <label class="field-label" for="auth-email">Email</label>
         <input class="auth-input" id="auth-email" type="email" autocomplete="email" maxlength="254" required />
         <label class="field-label" for="auth-password">Password</label>
         <input class="auth-input" id="auth-password" type="password" autocomplete="current-password" minlength="10" maxlength="256" required />
         <p class="auth-error" id="auth-error" role="alert"></p>
         <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
-        <button class="auth-forgot" id="forgot-password-open" type="button">Forgot password?</button>
-        <p class="auth-switch"><span id="auth-switch-prompt">New to StudyBuddy?</span> <button type="button" id="auth-toggle">Create an account</button></p>
       </form>
-      <section class="auth-card auth-reset-card" id="password-reset-panel" aria-labelledby="password-reset-title" hidden>
-        <p class="eyebrow"><span class="eyebrow-line"></span> ACCOUNT RECOVERY</p>
-        <h1 id="password-reset-title">Reset your <span class="serif-accent">password.</span></h1>
-        <p class="auth-copy">We’ll email a one-time verification code to the address linked to your StudyBuddy account.</p>
-        <form id="password-reset-request-form">
-          <label class="field-label" for="reset-email">Account email</label>
-          <input class="auth-input" id="reset-email" type="email" autocomplete="email" maxlength="254" required />
-          <button class="primary-button auth-submit" id="send-reset-code" type="submit">Send verification code</button>
-        </form>
-        <form id="password-reset-confirm-form" hidden>
-          <label class="field-label" for="reset-code">Verification code</label>
-          <input class="auth-input" id="reset-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" required />
-          <label class="field-label" for="reset-new-password">New password</label>
-          <input class="auth-input" id="reset-new-password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required />
-          <label class="field-label" for="reset-confirm-password">Confirm new password</label>
-          <input class="auth-input" id="reset-confirm-password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required />
-          <button class="primary-button auth-submit" id="confirm-password-reset" type="submit">Reset password</button>
-        </form>
-        <p class="auth-error" id="password-reset-error" role="alert"></p>
-        <p class="auth-switch"><button type="button" id="back-to-sign-in">Back to sign in</button></p>
-      </section>
       <p class="auth-footnote">Your study material and progress are saved to your account.</p>
     </section>
     <div class="app-shell" id="app-shell" hidden>
@@ -80,10 +62,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v17H7.5A2.5 2.5 0 0 0 5 21.5v-17Z" /><path d="M5 18.5A2.5 2.5 0 0 1 7.5 16H20M9 6h7M9 9h7" /></svg>
             <span>Learning room</span>
           </a>
-          <a class="nav-link" href="#revision" data-view="revision" aria-label="Revision room" data-tooltip="Revision room">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5h6M8 10h2m3 0h4M8 14h2m3 0h4M8 18h2m3 0h4"/></svg>
-            <span>Revision room</span>
-          </a>
           <a class="nav-link" href="#history" data-view="history" aria-label="Study history" data-tooltip="Study history">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2M5 5.5 3.5 8M3.5 8H7"/></svg>
             <span>Study history</span>
@@ -107,6 +85,8 @@
           <div class="breadcrumb"><span>My workspace</span><span class="crumb-slash">/</span><strong id="page-crumb">My study plan</strong></div>
           <div class="topbar-actions">
             <span class="today-label"><span class="status-dot"></span> Your personal learning space</span>
+            <span class="save-status" id="save-status" role="status" aria-live="polite" hidden></span>
+            <button class="save-retry-button" id="save-retry" type="button" hidden>Retry save</button>
             <button class="icon-button" id="help-button" aria-label="How StudyBuddy works" title="How StudyBuddy works">?</button>
             <button class="sign-out-button" id="sign-out" type="button">Log out</button>
           </div>
@@ -117,7 +97,7 @@
             <div>
               <p class="eyebrow"><span class="eyebrow-line"></span> YOUR NEXT CHAPTER STARTS HERE</p>
               <h1 id="welcome-title">Make learning <span class="serif-accent">click.</span></h1>
-              <p class="welcome-copy">Bring your study material. Your tutor will explain it, help you practise, and build a plan that fits your days.</p>
+              <p class="welcome-copy">Ask about any subject, enter a topic, or share study material. Your tutor will explain it, help you practise, and build a plan that fits your days.</p>
             </div>
             <div class="date-chip"><span class="date-icon" aria-hidden="true">✳</span><span id="today-date">A fresh start, any day</span></div>
           </div>
@@ -143,7 +123,7 @@
                   <input id="file-input" type="file" accept=".txt,.md,.markdown,.csv,.json,.html,.htm,text/plain,text/markdown,text/csv,application/json,text/html,image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp,image/heic,image/heif,image/tiff" />
                 </label>
                 <div class="or-divider"><span>OR PASTE YOUR TEXT</span></div>
-                <textarea id="material-text" rows="5" placeholder="Paste notes, textbook text, or another text source here. Choose this instead of uploading a file." aria-describedby="material-hint"></textarea>
+                <textarea id="material-text" rows="5" placeholder="Enter an education-related topic or question, or paste notes (for example: operating systems, photosynthesis, or algebra)." aria-describedby="material-hint"></textarea>
                 <div class="input-footer"><span id="material-hint" aria-live="polite">Checking the AI tutor…</span><span id="word-count">0 words</span></div>
 
                 <div class="setup-divider"></div>
@@ -206,6 +186,7 @@
             <aside class="lesson-sidebar card">
               <div class="lesson-list-heading"><span class="section-kicker">YOUR LEARNING PLAN</span><span class="lesson-progress-summary"><span class="lesson-progress-count" id="lesson-progress-count">0 / 0</span><strong class="lesson-progress-percent" id="lesson-progress-percent">0%</strong></span></div>
               <div class="progress-track" id="lesson-progress-track" role="progressbar" aria-label="Topics mastered" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="lesson-progress-bar"></span></div>
+              <section class="readiness-panel" id="readiness-panel" aria-live="polite"></section>
               <div id="spaced-review-list" class="spaced-review-list" aria-live="polite"></div>
               <div id="lesson-list" class="lesson-list"></div>
               <div class="plan-time"><span aria-hidden="true">◷</span><span id="plan-time-label">3 days · 3 hours total</span></div>
@@ -236,10 +217,6 @@
           <div id="results-content"></div>
         </section>
 
-        <section class="page-view" id="revision-view" aria-labelledby="revision-title">
-          <div id="revision-content"></div>
-        </section>
-
         <footer class="footer"><span>StudyBuddy</span><span>Small steps. Strong understanding.</span></footer>
       </main>
     </div>
@@ -249,8 +226,9 @@
       <span class="how-icon" aria-hidden="true">✳</span>
       <p class="section-kicker">A NOTE ABOUT THIS FIRST VERSION</p>
       <h2>Your notes stay yours.</h2>
-      <p>With a Groq API key configured, StudyBuddy uses Groq for lessons, quizzes, image analysis, and assessments. Module names and section headings become context for focused lessons; each bullet and each comma-separated subtopic becomes its own lesson, up to 500 topics per plan. Each lesson page is generated only when selected, with up to 250 output tokens per lesson and model reasoning disabled to reserve tokens for the explanation. Lesson pages give a concise explanation and example. Quizzes contain multiple-choice questions based on completed lesson topics, followed by an applied scenario in multiple-choice format. Choose a question count or include all topics. Each answer includes an explanation. Revision focuses on the exact questions you answered incorrectly or marked as needing review, showing your answer, the correct answer, and an option to get another focused explanation. Model availability and account limits apply.</p>
+      <p>With a Groq API key configured, StudyBuddy uses Groq for lessons, quizzes, image analysis, and assessments. Module names and section headings become context for focused lessons; each bullet and each comma-separated subtopic becomes its own lesson, up to 500 topics per plan. Each lesson page is generated only when selected, with up to 250 output tokens per lesson and model reasoning disabled to reserve tokens for the explanation. Lesson pages give a concise explanation and example. Quizzes contain multiple-choice questions based on completed lesson topics, followed by an applied scenario in multiple-choice format. Choose a question count or include all topics. Each answer includes an explanation. Missed answers appear below the quiz results with your answer, the correct answer, and an option to get another focused explanation. Model availability and account limits apply.</p>
       <p>Lesson requests send the selected topic part, follow-up explanation requests send that topic's notes and the learner's question and missed-answer details, quiz requests send lesson summaries, and image requests send the image to Groq; StudyBuddy does not save those requests. Image analysis adapts to visible content such as text, flowcharts, diagrams, charts, people, and objects, describing their labels, actions, and relationships while marking uncertain details. AI explanations can still be wrong: compare important details with your source material and trusted references. Without a Groq API key, StudyBuddy can read visible text from an image but cannot interpret diagrams or other visual content. Supported image formats include PNG, JPEG, WebP, and GIF; other formats are converted in your browser when possible.</p>
+      <p>Lessons and quiz explanations include a related verbatim passage from your notes when a match is found; use it to check the explanation, not as a guarantee that every claim is supported. Study readiness is an estimate based on checked topics, and untested topics lower the estimate. Lesson pages can be read aloud in English by your browser and printed or saved as a PDF. The save indicator shows when progress is saved and offers a retry if saving fails.</p>
       <button class="primary-button dialog-done" id="dialog-done">Got it</button>
     </dialog>
   </body>

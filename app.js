@@ -19,11 +19,12 @@ const appShell = document.querySelector("#app-shell");
 const authForm = document.querySelector("#auth-form");
 const authError = document.querySelector("#auth-error");
 const FRIENDLY_ERROR = "Something went wrong. Please try again.";
-let authMode = "login";
 let signedIn = false;
 let signedInEmail = "";
 let currentView = "home";
 let saveTimer;
+let progressSaveRevision = 0;
+let progressSaveQueue = Promise.resolve();
 let progressRevision = Date.now();
 const MAX_STUDY_DAYS = 30;
 const MAX_PLAN_TOPICS = 500;
@@ -69,6 +70,7 @@ const state = {
   masteryCheckPage: false,
   completedLessons: new Set(),
   masteryChecks: {},
+  topicAssessment: {},
   lessonFeedback: {},
   examDate: "",
   spacedReviews: {},
@@ -80,8 +82,6 @@ const state = {
   quizAppliedTopicIndex: null,
   currentQuestion: 0,
   answers: [],
-  quizMode: "initial",
-  explainedTopicIndices: new Set(),
   selectedOption: null,
   problemAnswer: "",
   problemSolutionRevealed: false,
@@ -97,7 +97,6 @@ const pageCrumb = document.querySelector("#page-crumb");
 const lessonTitles = {
   home: "My study plan",
   learn: "Learning room",
-  revision: "Revision room",
   history: "Study history",
 };
 let toastTimer;
@@ -125,7 +124,7 @@ async function refreshVisionStatus() {
     const status = await response.json();
     visionAvailable = status.aiConfigured === true || status.aiAvailable === true || status.visionAvailable === true;
     materialHint.textContent = visionAvailable
-      ? "Guided lessons, quizzes, and image understanding are ready. Separate long notes with section headings for detailed lessons one part at a time."
+      ? "The AI tutor is ready for education questions and study topics. Add notes when you want lessons grounded in your course material."
       : "Guided lessons and quizzes are currently unavailable. Images can still be read with basic text recognition.";
     return visionAvailable;
   } catch (error) {
@@ -138,7 +137,21 @@ async function refreshVisionStatus() {
 
 const visionStatusReady = refreshVisionStatus();
 
+function stopLessonSpeech() {
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function printStudyPlan() {
+  document.body.classList.add("print-study-plan");
+  try {
+    window.print();
+  } finally {
+    document.body.classList.remove("print-study-plan");
+  }
+}
+
 function showView(name, persist = true) {
+  if (name !== "learn") stopLessonSpeech();
   currentView = name;
   views.forEach((view) => view.classList.toggle("active", view.id === `${name}-view`));
   navLinks.forEach((link) => link.classList.toggle("active", link.dataset.view === name));
@@ -175,6 +188,7 @@ function progressSnapshot() {
     masteryCheckPage: state.masteryCheckPage,
     completedLessons: [...state.completedLessons],
     masteryChecks: state.masteryChecks,
+    topicAssessment: state.topicAssessment,
     lessonFeedback: state.lessonFeedback,
     examDate: state.examDate,
     spacedReviews: state.spacedReviews,
@@ -186,8 +200,6 @@ function progressSnapshot() {
     quizAppliedTopicIndex: state.quizAppliedTopicIndex,
     currentQuestion: state.currentQuestion,
     answers: state.answers,
-    quizMode: state.quizMode,
-    explainedTopicIndices: [...state.explainedTopicIndices],
     selectedOption: state.selectedOption,
     problemAnswer: state.problemAnswer,
     problemSolutionRevealed: state.problemSolutionRevealed,
@@ -208,6 +220,7 @@ function resetStudyState() {
   state.masteryCheckPage = false;
   state.completedLessons = new Set();
   state.masteryChecks = {};
+  state.topicAssessment = {};
   state.lessonFeedback = {};
   state.examDate = "";
   state.spacedReviews = {};
@@ -220,8 +233,6 @@ function resetStudyState() {
   state.quizAppliedTopicIndex = null;
   state.currentQuestion = 0;
   state.answers = [];
-  state.quizMode = "initial";
-  state.explainedTopicIndices = new Set();
   state.selectedOption = null;
   state.problemAnswer = "";
   state.problemSolutionRevealed = false;
@@ -242,22 +253,64 @@ function saveProgress(immediate = false) {
   if (!signedIn || !state.material) return;
   clearTimeout(saveTimer);
   const snapshot = progressSnapshot();
+  const revision = ++progressSaveRevision;
   try {
     if (signedInEmail) localStorage.setItem(`studybuddy-progress:${signedInEmail}`, JSON.stringify(snapshot));
   } catch (error) {
     console.warn("Could not cache study progress in this browser.", error);
   }
-  const save = () => fetch("/api/progress", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ progress: snapshot }),
-  }).then(async (response) => {
-    if (!response.ok) throw new Error(`Progress save failed (${response.status}).`);
-    const result = await response.json();
-    if (result.archived || result.historyAdded) await loadStudyHistory();
-  }).catch((error) => console.error("Could not save study progress.", error));
+  setProgressSaveStatus("Saving…", "saving");
+  const save = () => {
+    const queuedSave = progressSaveQueue.catch(() => {}).then(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const response = await fetch("/api/progress", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ progress: snapshot }),
+          });
+          if (!response.ok) {
+            const error = new Error(`Progress save failed (${response.status}).`);
+            error.status = response.status;
+            throw error;
+          }
+          const result = await response.json();
+          if (revision === progressSaveRevision) setProgressSaveStatus("Saved", "saved");
+          if (result.archived || result.historyAdded) await loadStudyHistory();
+          return;
+        } catch (error) {
+          const retryable = !Number.isInteger(error.status)
+            || error.status === 408
+            || error.status === 429
+            || error.status >= 500;
+          if (retryable && attempt < 2) {
+            if (revision === progressSaveRevision) setProgressSaveStatus("Retrying save…", "saving");
+            await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+            continue;
+          }
+          if (revision === progressSaveRevision) setProgressSaveStatus("Couldn’t save", "error");
+          console.error("Could not save study progress.", error);
+          return;
+        }
+      }
+    });
+    progressSaveQueue = queuedSave.catch((error) => {
+      console.error("Could not queue study progress save.", error);
+    });
+    return queuedSave;
+  };
   if (immediate) return save();
   saveTimer = setTimeout(save, 450);
+}
+
+function setProgressSaveStatus(message, status) {
+  const indicator = document.querySelector("#save-status");
+  const retryButton = document.querySelector("#save-retry");
+  if (!indicator || !retryButton) return;
+  indicator.hidden = !message;
+  indicator.textContent = message;
+  indicator.dataset.state = status;
+  retryButton.hidden = status !== "error";
 }
 
 function restoreProgress(saved, persist = true) {
@@ -292,6 +345,23 @@ function restoreProgress(saved, persist = true) {
   state.masteryChecks = saved.masteryChecks && typeof saved.masteryChecks === "object" && !Array.isArray(saved.masteryChecks)
     ? saved.masteryChecks
     : {};
+  state.topicAssessment = {};
+  if (saved.topicAssessment && typeof saved.topicAssessment === "object" && !Array.isArray(saved.topicAssessment)) {
+    Object.entries(saved.topicAssessment).forEach(([index, assessment]) => {
+      const topicIndex = Number(index);
+      if (
+        Number.isInteger(topicIndex)
+        && topicIndex >= 0
+        && topicIndex < state.topics.length
+        && assessment
+        && Number.isFinite(assessment.score)
+        && assessment.score >= 0
+        && assessment.score <= 1
+      ) {
+        state.topicAssessment[topicIndex] = { score: assessment.score, updatedAt: Number(assessment.updatedAt) || 0 };
+      }
+    });
+  }
   if (!saved.masteryChecks) state.completedLessons.clear();
   state.lessonFeedback = saved.lessonFeedback && typeof saved.lessonFeedback === "object" && !Array.isArray(saved.lessonFeedback)
     ? saved.lessonFeedback
@@ -322,8 +392,6 @@ function restoreProgress(saved, persist = true) {
     : state.quizTopicIndices[state.quizTopicIndices.length - 1] ?? Math.floor(Math.max(state.topics.length - 1, 0) / 2);
   state.currentQuestion = Math.min(Math.max(Number(saved.currentQuestion) || 0, 0), Math.max(state.quizTotalQuestions - 1, 0));
   state.answers = Array.isArray(saved.answers) ? saved.answers : [];
-  state.quizMode = saved.quizMode === "revision" ? "revision" : "initial";
-  state.explainedTopicIndices = new Set((Array.isArray(saved.explainedTopicIndices) ? saved.explainedTopicIndices : []).filter(Number.isInteger));
   state.selectedOption = Number.isInteger(saved.selectedOption) ? saved.selectedOption : null;
   state.problemAnswer = typeof saved.problemAnswer === "string" ? saved.problemAnswer : "";
   state.problemSolutionRevealed = saved.problemSolutionRevealed === true;
@@ -341,8 +409,10 @@ function restoreProgress(saved, persist = true) {
   studyDaysInput.value = String(state.schedule.length);
   renderDailyHours(state.schedule.length, state.schedule);
   updateWordCount();
-  if (saved.view === "results" && state.answers.length) renderResults();
-  else if (saved.view === "revision" && state.answers.length) renderRevision();
+  if ((saved.view === "results" || saved.view === "revision") && state.answers.length) renderResults();
+  else if (saved.view === "revision") showView("home");
+  else if (saved.view === "results") renderResults();
+  else if (saved.view === "quiz" && saved.quizMode === "revision") renderResults();
   else if (saved.view === "quiz" && state.quizSetupOpen) showQuizSetup();
   else if (saved.view === "quiz" && state.quizTotalQuestions) {
     showView("quiz");
@@ -356,123 +426,15 @@ function restoreProgress(saved, persist = true) {
   return true;
 }
 
-function setAuthMode(mode) {
-  authMode = mode;
+function setAuthMode() {
   document.querySelector("#auth-form").hidden = false;
-  document.querySelector("#password-reset-panel").hidden = true;
-  document.querySelector("#forgot-password-open").hidden = mode !== "login";
-  const creating = mode === "register";
-  document.querySelector("#auth-title").innerHTML = creating
-    ? 'Create your <span class="serif-accent">account.</span>'
-    : 'Welcome <span class="serif-accent">back.</span>';
-  document.querySelector("#auth-copy").textContent = creating
-    ? "Create an account to save your study progress and continue on any device."
-    : "Sign in to continue your study plan from any device.";
-  document.querySelector("#auth-submit").textContent = creating ? "Create account" : "Sign in";
-  document.querySelector("#auth-switch-prompt").textContent = creating ? "Already have an account?" : "New to StudyBuddy?";
-  document.querySelector("#auth-toggle").textContent = creating ? "Sign in" : "Create an account";
-  document.querySelector("#auth-password").autocomplete = creating ? "new-password" : "current-password";
+  authError.classList.remove("auth-success");
+  document.querySelector("#auth-title").innerHTML = 'Welcome <span class="serif-accent">back.</span>';
+  document.querySelector("#auth-copy").textContent = "Sign in or create an account with Google, or use an existing password account.";
+  document.querySelector("#auth-submit").textContent = "Sign in";
+  document.querySelector("#auth-password").autocomplete = "current-password";
   authError.textContent = "";
 }
-
-function openPasswordReset() {
-  document.querySelector("#reset-email").value = document.querySelector("#auth-email").value.trim();
-  const status = document.querySelector("#password-reset-error");
-  status.textContent = "";
-  status.classList.remove("auth-success");
-  document.querySelector("#password-reset-request-form").hidden = false;
-  document.querySelector("#password-reset-confirm-form").hidden = true;
-  document.querySelector("#reset-email").readOnly = false;
-  document.querySelector("#auth-form").hidden = true;
-  document.querySelector("#password-reset-panel").hidden = false;
-  document.querySelector("#reset-email").focus();
-}
-
-async function sendPasswordResetCode() {
-  const status = document.querySelector("#password-reset-error");
-  const button = document.querySelector("#send-reset-code");
-  status.textContent = "";
-  status.classList.remove("auth-success");
-  button.disabled = true;
-  const originalText = button.textContent;
-  button.textContent = "Sending code…";
-  try {
-    const response = await fetch("/api/auth/password-reset/request", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: document.querySelector("#reset-email").value.trim() }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-    document.querySelector("#password-reset-request-form").hidden = true;
-    document.querySelector("#password-reset-confirm-form").hidden = false;
-    document.querySelector("#reset-email").readOnly = true;
-    status.textContent = result.message || "If that email matches an account, a verification code has been sent.";
-    status.classList.add("auth-success");
-    document.querySelector("#reset-code").focus();
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
-}
-
-document.querySelector("#forgot-password-open").addEventListener("click", openPasswordReset);
-document.querySelector("#back-to-sign-in").addEventListener("click", () => {
-  document.querySelector("#password-reset-panel").hidden = true;
-  document.querySelector("#auth-form").hidden = false;
-  document.querySelector("#reset-email").readOnly = false;
-  authError.textContent = "";
-  document.querySelector("#auth-email").focus();
-});
-document.querySelector("#password-reset-request-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  await sendPasswordResetCode();
-});
-document.querySelector("#password-reset-confirm-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const status = document.querySelector("#password-reset-error");
-  const button = document.querySelector("#confirm-password-reset");
-  const password = document.querySelector("#reset-new-password").value;
-  if (password !== document.querySelector("#reset-confirm-password").value) {
-    status.textContent = "The passwords do not match.";
-    status.classList.remove("auth-success");
-    return;
-  }
-  status.textContent = "";
-  button.disabled = true;
-  const originalText = button.textContent;
-  button.textContent = "Resetting password…";
-  try {
-    const response = await fetch("/api/auth/password-reset/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: document.querySelector("#reset-email").value.trim(),
-        code: document.querySelector("#reset-code").value.trim(),
-        password,
-      }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-    document.querySelector("#password-reset-panel").hidden = true;
-    document.querySelector("#auth-form").hidden = false;
-    document.querySelector("#auth-email").value = document.querySelector("#reset-email").value.trim();
-    document.querySelector("#auth-password").value = "";
-    document.querySelector("#reset-email").readOnly = false;
-    document.querySelector("#reset-code").value = "";
-    document.querySelector("#reset-new-password").value = "";
-    document.querySelector("#reset-confirm-password").value = "";
-    setAuthMode("login");
-    authError.textContent = result.message || "Password reset. Sign in with your new password.";
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
-});
 
 async function enterApp(user, progress) {
   signedIn = true;
@@ -552,8 +514,19 @@ async function loadSignedInSession() {
     const response = await fetch("/api/auth/session", { cache: "no-store" });
     const result = await response.json().catch(() => ({}));
     if (response.ok && result.authenticated) await enterApp(result.user, result.progress);
-    else if (response.ok) setAuthMode(result.hasAccounts ? "login" : "register");
+    else if (response.ok) setAuthMode();
     else authError.textContent = result.error || FRIENDLY_ERROR;
+    const authErrorCode = new URLSearchParams(location.search).get("auth_error");
+    const authErrors = {
+      google_not_configured: "Google sign-in is not configured on this server yet.",
+      google_cancelled: "Google sign-in was cancelled.",
+      google_invalid_state: "This Google sign-in request expired or could not be verified. Please try again.",
+      google_failed: "Google sign-in could not be completed. Please try again.",
+    };
+    if (authErrorCode && authErrors[authErrorCode]) {
+      authError.textContent = authErrors[authErrorCode];
+      history.replaceState(null, "", `${location.pathname}${location.hash}`);
+    }
   } catch (error) {
     console.error("Could not check the StudyBuddy account session.", error);
     authError.textContent = FRIENDLY_ERROR;
@@ -989,6 +962,7 @@ function createPlan(material, schedule, topics = splitIntoTopics(material), inpu
   state.currentLesson = 0;
   state.completedLessons = new Set();
   state.masteryChecks = {};
+  state.topicAssessment = {};
   state.lessonFeedback = {};
   state.spacedReviews = {};
   state.activeSpacedReview = null;
@@ -1012,7 +986,7 @@ function isStudyDayLocked(dayNumber) {
 }
 
 function canOpenLesson(topicIndex) {
-  return topicIndex === state.currentLesson && !state.completedLessons.has(topicIndex);
+  return topicIndex === state.currentLesson || state.completedLessons.has(topicIndex);
 }
 
 function renderSpacedReviewList() {
@@ -1026,6 +1000,56 @@ function renderSpacedReviewList() {
   }
   panel.innerHTML = `<p class="spaced-review-heading">READY TO REVIEW</p>${dueReviews.map(([topicIndex]) => `<button class="spaced-review-item" type="button" data-spaced-review="${topicIndex}">Quick recall · ${escapeHtml(state.topics[Number(topicIndex)]?.title || "Earlier topic")}</button>`).join("")}`;
   panel.querySelectorAll("[data-spaced-review]").forEach((button) => button.addEventListener("click", () => startSpacedReview(Number(button.dataset.spacedReview))));
+}
+
+function renderReadinessSummary() {
+  const panel = document.querySelector("#readiness-panel");
+  if (!panel) return;
+  const assessed = Object.entries(state.topicAssessment)
+    .map(([index, result]) => ({ index: Number(index), score: result.score }))
+    .filter((result) => Number.isInteger(result.index) && result.index >= 0 && result.index < state.topics.length);
+  const totalScore = assessed.reduce((total, result) => total + result.score, 0);
+  const readiness = state.topics.length ? Math.round(totalScore / state.topics.length * 100) : 0;
+  const weakTopics = assessed.filter((result) => result.score < 0.7).sort((left, right) => left.score - right.score);
+  const dueReviews = Object.entries(state.spacedReviews)
+    .filter(([, review]) => Number(review.dueAt) <= Date.now())
+    .map(([index]) => Number(index));
+  const focusTopics = [...new Set([...dueReviews, ...weakTopics.map((result) => result.index)])]
+    .filter((index) => state.topics[index])
+    .slice(0, 3);
+  if (!focusTopics.length) {
+    const nextTopic = state.topics.findIndex((_, index) => !state.completedLessons.has(index));
+    if (nextTopic >= 0) focusTopics.push(nextTopic);
+  }
+  const focusLabel = dueReviews.length
+    ? "Due for spaced recall"
+    : weakTopics.length
+      ? "Worth another look"
+      : assessed.length === state.topics.length
+        ? "No weak topics found"
+        : "Next topic to learn";
+  const noFocusMessage = assessed.length === state.topics.length && assessed.length
+    ? "No weak topics right now. Revisit any topic whenever you like."
+    : "Complete a lesson check to get a review recommendation.";
+  panel.innerHTML = `
+    <div class="readiness-heading"><strong>Study readiness</strong><span>${assessed.length ? `${readiness}%` : "Building"}</span></div>
+    <p>${assessed.length} of ${state.topics.length} topics checked · estimate changes as you practise</p>
+    <div class="readiness-bar" role="progressbar" aria-label="Estimated study readiness" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${readiness}"><span style="width:${readiness}%"></span></div>
+    <strong class="readiness-focus-label">${escapeHtml(focusLabel)}</strong>
+    ${focusTopics.length
+      ? `<div class="readiness-focus-list">${focusTopics.map((index) => `
+        <button class="readiness-focus-item" type="button" data-readiness-topic="${index}">
+          ${escapeHtml(state.topics[index].title)}
+          ${Number.isFinite(state.topicAssessment[index]?.score) ? `<span>${Math.round(state.topicAssessment[index].score * 100)}%</span>` : ""}
+        </button>`).join("")}</div>`
+      : `<p class="readiness-no-focus">${escapeHtml(noFocusMessage)}</p>`}
+    <small>Planning estimate from your checks, not an exam guarantee.</small>`;
+  panel.querySelectorAll("[data-readiness-topic]").forEach((button) => button.addEventListener("click", () => {
+    state.currentLesson = Number(button.dataset.readinessTopic);
+    state.masteryCheckPage = false;
+    renderLearningRoom();
+    saveProgress(true);
+  }));
 }
 
 function renderSpacedReviewChallenge() {
@@ -1103,6 +1127,7 @@ function finishSpacedReview(topicIndex, correct) {
 }
 
 function renderLearningRoom() {
+  stopLessonSpeech();
   const list = document.querySelector("#lesson-list");
   list.innerHTML = buildDailyTopicSchedule(state.topics, state.schedule)
     .map((day) => `
@@ -1127,6 +1152,7 @@ function renderLearningRoom() {
   );
 
   renderSpacedReviewList();
+  renderReadinessSummary();
   const completed = state.completedLessons.size;
   const progressPercent = state.topics.length
     ? Math.round((completed / state.topics.length) * 100)
@@ -1257,11 +1283,17 @@ function showLesson(lesson, topic, lessonContent, nextButton) {
     <div class="lesson-meta">LESSON PAGE ${String(state.currentLesson + 1).padStart(2, "0")} / ${String(state.topics.length).padStart(2, "0")} <span class="lesson-duration">about ${lessonMinutes()} min</span></div>
     <h2>${escapeHtml(topic.title)}</h2>
     <p class="lesson-intro">A focused lesson page based on your study material.</p>
+    <div class="lesson-tools">
+      <button class="secondary-button" id="listen-lesson" type="button">Listen</button>
+      <button class="secondary-button" id="stop-lesson-speech" type="button" disabled>Stop</button>
+      <button class="secondary-button" id="print-study-plan" type="button">Print / save as PDF</button>
+      <span class="speech-status" id="speech-status" role="status" aria-live="polite"></span>
+    </div>
     ${lesson.truncated ? `<p class="lesson-error" role="status">${FRIENDLY_ERROR}</p><button class="secondary-button" id="retry-short-lesson" type="button">Try lesson again</button>` : ""}
     <section class="lesson-block lesson-detail-section"><h3>Understand this topic</h3>${renderLessonBullets(lesson.content || lesson.explanation)}</section>
     ${renderLessonVisual(lesson.visual, lesson.visualWarning)}
     <section class="spaced-review-challenge" id="spaced-review-challenge" hidden></section>
-    <details class="lesson-source"><summary>Review the notes this lesson is based on</summary><p>${splitReadable(topic.content).map(escapeHtml).join("\n\n")}</p></details>
+    ${renderSourceEvidence(topic.content, `${topic.title} ${lesson.content || lesson.explanation}`)}
     <div class="reflection-box"><label for="reflection-input">Which part of this topic would you like explained further?</label><textarea id="reflection-input" rows="2" maxlength="500" placeholder="Name a term, idea, or step you want me to explain…"></textarea><button class="secondary-button" id="explain-part" type="button">Explain this part</button><div class="follow-up-answer" id="follow-up-answer" aria-live="polite"></div></div>
     <section class="lesson-feedback" id="lesson-feedback"><strong>Was this lesson helpful?</strong><button class="secondary-button" type="button" data-lesson-feedback="helpful">Yes</button><button class="secondary-button" type="button" data-lesson-feedback="needs-work">Needs work</button><span class="lesson-feedback-status" aria-live="polite"></span><textarea rows="2" maxlength="300" placeholder="What should be clearer? (optional)" hidden></textarea></section>
     </div>
@@ -1277,6 +1309,44 @@ function showLesson(lesson, topic, lessonContent, nextButton) {
   renderMasteryCheck(topic, state.currentLesson, lessonContent, nextButton);
   lessonContent.querySelector("#mastery-check").hidden = !isOnCheckPage;
   renderSpacedReviewChallenge();
+  const listenButton = lessonContent.querySelector("#listen-lesson");
+  const stopButton = lessonContent.querySelector("#stop-lesson-speech");
+  const speechStatus = lessonContent.querySelector("#speech-status");
+  if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+    listenButton.disabled = true;
+    speechStatus.textContent = "Read-aloud is not available in this browser.";
+  } else {
+    listenButton.addEventListener("click", () => {
+      stopLessonSpeech();
+      const utterance = new SpeechSynthesisUtterance(
+        `${topic.title}. ${(lesson.content || lesson.explanation).replace(/(^|\n)\s*-\s/g, "$1").replace(/[*_`#]/g, "")}`,
+      );
+      utterance.lang = "en-US";
+      utterance.onstart = () => {
+        listenButton.disabled = true;
+        stopButton.disabled = false;
+        speechStatus.textContent = "Reading this lesson aloud.";
+      };
+      utterance.onend = () => {
+        listenButton.disabled = false;
+        stopButton.disabled = true;
+        speechStatus.textContent = "";
+      };
+      utterance.onerror = (event) => {
+        listenButton.disabled = false;
+        stopButton.disabled = true;
+        speechStatus.textContent = event.error === "canceled" ? "" : "Could not read this lesson aloud.";
+      };
+      window.speechSynthesis.speak(utterance);
+    });
+    stopButton.addEventListener("click", () => {
+      stopLessonSpeech();
+      listenButton.disabled = false;
+      stopButton.disabled = true;
+      speechStatus.textContent = "";
+    });
+  }
+  lessonContent.querySelector("#print-study-plan").addEventListener("click", printStudyPlan);
   lessonContent.querySelector("#explain-part").addEventListener("click", () => explainLessonPart(topic, lessonContent));
   const savedFeedback = state.lessonFeedback[state.currentLesson];
   const feedbackStatus = lessonContent.querySelector(".lesson-feedback-status");
@@ -1364,6 +1434,7 @@ function renderMasteryCheck(topic, topicIndex, lessonContent, nextButton) {
     check.answered = true;
     check.passed = check.selected === question.answerIndex;
     check.attempts = (check.attempts || 0) + 1;
+    state.topicAssessment[topicIndex] = { score: check.passed ? 1 : 0, updatedAt: Date.now() };
     if (check.passed) {
       state.completedLessons.add(topicIndex);
       state.spacedReviews[topicIndex] = state.spacedReviews[topicIndex] || {
@@ -1482,6 +1553,37 @@ function splitReadable(content) {
     .filter(Boolean);
 }
 
+function findSourceExcerpt(source, query) {
+  const stopWords = new Set(["about", "after", "again", "also", "among", "because", "before", "being", "between", "could", "does", "during", "each", "from", "have", "into", "more", "most", "other", "should", "than", "that", "their", "there", "these", "they", "this", "through", "under", "using", "what", "when", "where", "which", "while", "with", "would", "your"]);
+  const queryTerms = new Set((query.match(/[a-z0-9]{3,}/gi) || [])
+    .map((term) => term.toLowerCase())
+    .filter((term) => !stopWords.has(term)));
+  if (!source.trim() || !queryTerms.size) return "";
+  const passages = source.match(/[^.!?\r\n]+(?:[.!?]+|$)/g) || [source];
+  const ranked = passages.map((passage, index) => {
+    const text = passage.trim();
+    const terms = new Set((text.match(/[a-z0-9]{3,}/gi) || []).map((term) => term.toLowerCase()));
+    return { text, index, score: [...queryTerms].filter((term) => terms.has(term)).length };
+  }).filter((passage) => passage.text && passage.text.length <= 600 && passage.score > 0);
+  ranked.sort((left, right) => right.score - left.score || left.index - right.index);
+  return ranked.slice(0, 2).sort((left, right) => left.index - right.index).map((passage) => passage.text).join(" ");
+}
+
+function renderSourceEvidence(source, query, savedExcerpt = "") {
+  const excerpt = savedExcerpt || findSourceExcerpt(source, query);
+  return `
+    <details class="source-evidence lesson-source">
+      <summary>Check a related passage in your notes</summary>
+      ${excerpt
+        ? `<p>Matched from your source notes to help you verify the explanation.</p><blockquote>${escapeHtml(excerpt)}</blockquote>`
+        : "<p>No short matching passage was found. Compare the explanation with the full topic notes.</p>"}
+      <details class="source-evidence-full">
+        <summary>View all notes for this topic</summary>
+        <p>${splitReadable(source).map(escapeHtml).join("\n\n")}</p>
+      </details>
+    </details>`;
+}
+
 async function buildQuiz() {
   const incompleteIndex = state.topics.findIndex((topic, index) =>
     !state.completedLessons.has(index),
@@ -1493,8 +1595,6 @@ async function buildQuiz() {
     showToast("Complete each lesson before starting the quiz.");
     return;
   }
-  state.quizMode = "initial";
-  state.explainedTopicIndices = new Set();
   state.questions = [];
   state.quizTopicIndices = state.topics.map((_, index) => index);
   state.quizTotalQuestions = 0;
@@ -1542,7 +1642,7 @@ async function startSelectedQuiz() {
   state.quizAppliedTopicIndex = remainingTopicIndices.length
     ? remainingTopicIndices[0]
     : shuffledTopicIndices[Math.floor(Math.random() * shuffledTopicIndices.length)];
-  await generateQuiz(selectedIndices, "initial", state.quizAppliedTopicIndex);
+  await generateQuiz(selectedIndices, state.quizAppliedTopicIndex);
 }
 
 function shuffleArray(items) {
@@ -1588,26 +1688,11 @@ function splitLongLessonPoint(point) {
   return shortPoints.length ? shortPoints : [point];
 }
 
-async function buildRevisionQuiz() {
-  const topicIndices = shuffleArray([...state.explainedTopicIndices]);
-  if (!topicIndices.length) return;
-  state.quizMode = "revision";
-  state.questions = [];
-  state.quizTopicIndices = topicIndices;
-  state.quizTotalQuestions = topicIndices.length;
-  state.currentQuestion = 0;
-  state.answers = [];
-  await saveProgress(true);
-  await generateQuiz(topicIndices, "revision");
-}
-
-async function generateQuiz(topicIndices = null, mode = Array.isArray(topicIndices) ? "revision" : "initial", appliedTopicIndex = null) {
-  const isRevisionQuiz = mode === "revision";
-  state.quizMode = mode;
+async function generateQuiz(topicIndices, appliedTopicIndex) {
   state.quizSetupOpen = false;
-  state.quizTopicIndices = Array.isArray(topicIndices) ? topicIndices : state.topics.map((_, index) => index);
+  state.quizTopicIndices = topicIndices;
   if (Number.isInteger(appliedTopicIndex)) state.quizAppliedTopicIndex = appliedTopicIndex;
-  state.quizTotalQuestions = state.quizTopicIndices.length + (isRevisionQuiz ? 0 : 1);
+  state.quizTotalQuestions = state.quizTopicIndices.length + 1;
   state.questions = [];
   state.answers = [];
   state.currentQuestion = 0;
@@ -1618,10 +1703,9 @@ async function generateQuiz(topicIndices = null, mode = Array.isArray(topicIndic
   document.querySelector("#quiz-setup").hidden = true;
   document.querySelector("#quiz-content").hidden = false;
   showView("quiz");
-  document.querySelector("#quiz-count-chip").textContent = isRevisionQuiz ? "PREPARING YOUR FOLLOW-UP QUIZ" : "PREPARING YOUR QUIZ";
-  document.querySelector("#quiz-intro").textContent = isRevisionQuiz
-    ? `One question at a time for the ${state.quizTopicIndices.length} topic${state.quizTopicIndices.length === 1 ? "" : "s"} you reviewed.`
-    : `One question at a time for your ${state.quizTotalQuestions} multiple-choice questions, including an applied scenario.`;
+  document.querySelector("#quiz-count-chip").textContent = "PREPARING YOUR QUIZ";
+  document.querySelector("#quiz-intro").textContent =
+    `One question at a time for your ${state.quizTotalQuestions} multiple-choice questions, including an applied scenario.`;
   await loadNextQuizQuestion();
 }
 
@@ -1634,8 +1718,7 @@ async function loadNextQuizQuestion() {
     renderResults();
     return;
   }
-  const isRevisionQuiz = state.quizMode === "revision";
-  const isProblem = !isRevisionQuiz && questionIndex === state.quizTopicIndices.length;
+  const isProblem = questionIndex === state.quizTopicIndices.length;
   const topicIndex = isProblem
     ? state.quizAppliedTopicIndex ?? state.quizTopicIndices[state.quizTopicIndices.length - 1]
     : state.quizTopicIndices[questionIndex];
@@ -1647,7 +1730,7 @@ async function loadNextQuizQuestion() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        mode: isProblem ? "problem" : isRevisionQuiz ? "revision" : "single",
+        mode: isProblem ? "problem" : "single",
         questionCount: 1,
         topics: [{
           title: topic.title,
@@ -1684,6 +1767,7 @@ function renderQuestion() {
   document.querySelector("#quiz-content").hidden = false;
   const index = state.currentQuestion;
   const question = state.questions[index];
+  const topicSource = state.topics[question.topicIndex]?.content || "";
   document.querySelector("#quiz-count-chip").textContent = `QUESTION ${String(index + 1).padStart(2, "0")} / ${String(state.quizTotalQuestions).padStart(2, "0")}`;
   const isProblem = question.type === "problem";
   const isAppliedScenario = question.applied === true;
@@ -1697,6 +1781,7 @@ function renderQuestion() {
       <div id="problem-solution" class="problem-solution" hidden>
         <p><strong>Answer:</strong> ${escapeHtml(question.answer)}</p>
         <p><strong>Worked solution:</strong> ${escapeHtml(question.solution)}</p>
+        ${renderSourceEvidence(topicSource, `${question.prompt} ${question.solution}`)}
         <p class="problem-self-rate">How did your attempt go?</p>
         <div class="problem-rating">
           <button class="secondary-button" data-self-rating="true" type="button">I got it</button>
@@ -1712,7 +1797,8 @@ function renderQuestion() {
             </button>`,
         )
         .join("")}</div>
-      <p class="quiz-feedback" aria-live="polite"></p>`}
+      <p class="quiz-feedback" aria-live="polite"></p>
+      <div class="quiz-source-evidence"></div>`}
     <div class="quiz-actions"><span class="quiz-progress">${index + 1} of ${state.quizTotalQuestions} questions</span><button class="primary-button" id="quiz-next" type="button" disabled>${isProblem ? "Continue" : "Check answer"}</button></div>
   `;
   const nextButton = document.querySelector("#quiz-next");
@@ -1776,6 +1862,7 @@ function renderQuestion() {
           selectedAnswer: document.querySelector("#problem-answer").value.trim(),
           correctAnswer: question.answer,
           explanation: question.solution,
+          sourceExcerpt: findSourceExcerpt(topicSource, `${question.prompt} ${question.solution}`),
         });
         document.querySelectorAll("[data-self-rating]").forEach((choice) => {
           choice.disabled = true;
@@ -1801,6 +1888,8 @@ function renderQuestion() {
     const feedback = document.querySelector(".quiz-feedback");
     feedback.textContent = existingAnswer.correct ? `That's right. ${question.explanation}` : "Not quite. You can review this topic after the quiz.";
     feedback.classList.toggle("incorrect", !existingAnswer.correct);
+    document.querySelector(".quiz-source-evidence").innerHTML =
+      renderSourceEvidence(topicSource, `${question.prompt} ${question.explanation}`, existingAnswer.sourceExcerpt || "");
     nextButton.dataset.answered = "true";
     nextButton.disabled = false;
     nextButton.innerHTML = index === state.quizTotalQuestions - 1
@@ -1844,6 +1933,7 @@ function checkAnswer(chosenIndex, question, options, nextButton) {
     selectedAnswer: question.options[chosenIndex],
     correctAnswer: question.options[question.answerIndex],
     explanation: question.explanation,
+    sourceExcerpt: findSourceExcerpt(state.topics[question.topicIndex]?.content || "", `${question.prompt} ${question.explanation}`),
   });
   state.selectedOption = null;
   const feedback = document.querySelector(".quiz-feedback");
@@ -1851,6 +1941,12 @@ function checkAnswer(chosenIndex, question, options, nextButton) {
     ? `That's right. ${question.explanation}`
     : "Not quite. You can review this topic after the quiz.";
   feedback.classList.toggle("incorrect", !correct);
+  document.querySelector(".quiz-source-evidence").innerHTML =
+    renderSourceEvidence(
+      state.topics[question.topicIndex]?.content || "",
+      `${question.prompt} ${question.explanation}`,
+      state.answers[state.answers.length - 1].sourceExcerpt,
+    );
   nextButton.disabled = false;
   nextButton.dataset.answered = "true";
   nextButton.innerHTML =
@@ -1862,33 +1958,57 @@ function checkAnswer(chosenIndex, question, options, nextButton) {
 
 function renderResults() {
   const correct = state.answers.filter((answer) => answer.correct).length;
-  const score = Math.round((correct / state.answers.length) * 100);
+  const score = state.answers.length ? Math.round((correct / state.answers.length) * 100) : null;
   const performance = summarizeTopics();
+  performance.forEach((item) => {
+    if (item.total) {
+      state.topicAssessment[item.index] = {
+        score: item.correct / item.total,
+        updatedAt: Date.now(),
+      };
+    }
+  });
+  const readiness = state.topics.length
+    ? Math.round(Object.values(state.topicAssessment).reduce((total, result) => total + result.score, 0) / state.topics.length * 100)
+    : 0;
+  const assessedTopics = Object.keys(state.topicAssessment).length;
   const incorrectAnswers = state.answers.filter((answer) => !answer.correct);
-  const message =
-    score >= 85
+  const message = score === null
+    ? "Take a quick check-in to see how you’re doing."
+    : score >= 85
       ? "You’ve got a strong handle on this material."
       : score >= 60
         ? "You’re building a good foundation. Let’s strengthen a few ideas."
         : "You’ve made a start. A focused review will help these ideas settle.";
   const resultsContent = document.querySelector("#results-content");
   resultsContent.innerHTML = `
-    <div class="subpage-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span> YOUR PROGRESS, NOT A GRADE</p><h1 id="results-title">${state.quizMode === "revision" ? "Your follow-up " : "Look how far you’ve "}<span class="serif-accent">${state.quizMode === "revision" ? "check-in." : "come."}</span></h1><p class="welcome-copy">${state.quizMode === "revision" ? "Here’s how you did on the topics you just reviewed." : "A quick reflection to help make your next study session even more useful."}</p></div></div>
-    <div class="results-hero"><div class="score-circle"><span>${score}%</span></div><div><p class="section-kicker">${state.quizMode === "revision" ? "AFTER REVISION" : "YOUR CHECK-IN"}</p><h2>${escapeHtml(message)}</h2><p>${correct} of ${state.answers.length} multiple-choice answers were correct. ${incorrectAnswers.length ? `${incorrectAnswers.length} ${incorrectAnswers.length === 1 ? "answer needs" : "answers need"} another explanation.` : "No incorrect answers need revision right now."}</p></div></div>
+    <div class="subpage-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span> YOUR PROGRESS, NOT A GRADE</p><h1 id="results-title">${score === null ? "Your " : "Look how far you’ve "}<span class="serif-accent">${score === null ? "results." : "come."}</span></h1><p class="welcome-copy">${score === null ? "Complete a quick check-in to see your results and any answers to review." : "A quick reflection to help make your next study session even more useful."}</p></div></div>
+    <div class="results-hero">${score === null ? "" : `<div class="score-circle"><span>${score}%</span></div>`}<div><p class="section-kicker">YOUR CHECK-IN</p><h2>${escapeHtml(message)}</h2><p>${score === null ? "No quiz answers are saved for this session." : `${correct} of ${state.answers.length} multiple-choice answers were correct. ${incorrectAnswers.length ? `${incorrectAnswers.length} ${incorrectAnswers.length === 1 ? "answer needs" : "answers need"} another explanation.` : "No incorrect answers need review right now."}`}</p><p class="readiness-result">Estimated plan readiness: <strong>${readiness}%</strong> · ${assessedTopics} of ${state.topics.length} topics checked</p></div></div>
     <div class="results-grid">
-      <section class="results-card card"><h3>${state.quizMode === "revision" ? "Follow-up by topic" : "How each topic felt"}</h3>${performance.filter((item) => state.quizMode !== "revision" || state.questions.some((question) => question.topicIndex === item.index)).map((item) => {
+      <section class="results-card card"><h3>How each topic felt</h3>${performance.map((item) => {
         const pct = item.total ? Math.round((item.correct / item.total) * 100) : 0;
         const tested = item.total > 0;
-        return `<div class="topic-result"><strong>${escapeHtml(state.topics[item.index].title)}</strong><span class="${!tested ? "" : pct >= 70 ? "result-good" : "result-practice"}">${tested ? `${item.correct}/${item.total} checks understood · ${pct >= 70 ? "feeling good" : "worth another look"}` : "Not tested in this quiz"}</span><p>${!tested ? "This topic was not selected for a question in this short quiz." : pct >= 70 ? (state.quizMode === "revision" ? "You answered the follow-up check correctly. Keep using recall to retain it." : "You understood this topic well; it isn’t included in your targeted revision plan.") : "Review the key idea and try recalling it once without looking."}</p></div>`;
+        return `<div class="topic-result"><strong>${escapeHtml(state.topics[item.index].title)}</strong><span class="${!tested ? "" : pct >= 70 ? "result-good" : "result-practice"}">${tested ? `${item.correct}/${item.total} checks understood · ${pct >= 70 ? "feeling good" : "worth another look"}` : "Not tested in this quiz"}</span><p>${!tested ? "This topic was not selected for a question in this short quiz." : pct >= 70 ? "You understood this topic well; it isn’t included in your targeted review." : "Review the key idea and try recalling it once without looking."}</p></div>`;
       }).join("")}</section>
-      <aside class="revision-callout"><p class="section-kicker">YOUR NEXT BEST STEP</p><h3>${incorrectAnswers.length ? "Let's work through the missed answers." : state.quizMode === "revision" ? "You strengthened those topics." : "No missed answers to revise."}</h3><p>${incorrectAnswers.length ? "Your revision plan will show only the questions you answered incorrectly or marked as needing review, with a focused explanation for each." : state.quizMode === "revision" ? "Your follow-up answers show how well the explanations helped. Revisit any lesson whenever you want more practice." : "You answered or self-rated every check correctly, so there’s nothing to add to your revision plan right now."}</p>${incorrectAnswers.length ? '<button class="primary-button" id="open-revision">Explain my missed answers <span class="button-arrow" aria-hidden="true">→</span></button>' : ""}</aside>
-    </div>`;
+      <aside class="results-next-step"><p class="section-kicker">YOUR NEXT BEST STEP</p><h3>${incorrectAnswers.length ? "Review the missed answers below." : score === null ? "Your lessons are ready when you are." : "No missed answers to review."}</h3><p>${incorrectAnswers.length ? "See your answer, the correct answer, and ask for another explanation if you need one." : score === null ? "Start a quiz after completing your lessons to get a personal check-in." : "Revisit a lesson or keep practising whenever you like."}</p>${incorrectAnswers.length ? '<button class="primary-button" id="jump-to-missed-answers" type="button">Review missed answers <span class="button-arrow" aria-hidden="true">↓</span></button>' : ""}</aside>
+    </div>
+    ${incorrectAnswers.length ? renderMissedAnswerReview(incorrectAnswers) : ""}`;
   if (incorrectAnswers.length) {
-    document.querySelector("#open-revision").addEventListener("click", renderRevision);
+    resultsContent.querySelector("#jump-to-missed-answers").addEventListener("click", () => {
+      resultsContent.querySelector("#missed-answer-review").scrollIntoView({ behavior: "smooth" });
+    });
+    resultsContent.querySelectorAll(".explain-missed-answer").forEach((button) => {
+      button.addEventListener("click", () => explainMissedAnswer(
+        incorrectAnswers[Number(button.dataset.answerIndex)],
+        button,
+        resultsContent.querySelector(`#missed-answer-explanation-${button.dataset.answerIndex}`),
+      ));
+    });
   }
-  state.lastScore = score;
+  state.lastScore = score ?? 0;
   state.lastPerformance = performance;
   showView("results");
+  saveProgress(true);
 }
 
 function summarizeTopics() {
@@ -1902,38 +2022,30 @@ function summarizeTopics() {
   });
 }
 
-function renderRevision() {
-  const incorrectAnswers = state.answers.filter((answer) => !answer.correct);
-  const revisionContent = document.querySelector("#revision-content");
-  revisionContent.innerHTML = `
-    <div class="revision-heading"><div><p class="eyebrow"><span class="eyebrow-line"></span> YOUR MISSED QUESTIONS</p><h1 id="revision-title">Let’s explain it <span class="serif-accent">again.</span></h1><p class="welcome-copy">${incorrectAnswers.length ? "Review just the answers you missed. Each one includes the correct answer and a focused explanation." : "There are no incorrect or self-rated weak answers to revise from this check-in."}</p></div><span class="revision-summary">${incorrectAnswers.length} ${incorrectAnswers.length === 1 ? "answer" : "answers"} to revisit</span></div>
-    <section class="revision-content-card card">
-      <p class="section-kicker">FOCUSED REVISION · MISSED ANSWERS ONLY</p>
-      ${incorrectAnswers.length ? incorrectAnswers.map((answer, index) => `
-        <article class="revision-topic-card">
-          <h3>${escapeHtml(state.topics[answer.topicIndex].title)} · Question ${index + 1}</h3>
-          <p class="revision-question"><strong>Question:</strong> ${escapeHtml(answer.prompt)}</p>
-          <p class="revision-your-answer"><strong>${answer.questionType === "problem" ? "Your attempt:" : "Your answer:"}</strong> ${escapeHtml(answer.selectedAnswer || "You marked this problem as needing review.")}</p>
-          <p class="revision-correct-answer"><strong>Correct answer:</strong> ${escapeHtml(answer.correctAnswer)}</p>
-          <p class="revision-prompt"><strong>Why:</strong> ${escapeHtml(answer.explanation)}</p>
-          <button class="secondary-button explain-missed-answer" data-answer-index="${index}" type="button">Explain this answer again</button>
-          <div class="missed-answer-explanation" id="missed-answer-explanation-${index}" aria-live="polite"></div>
-        </article>`).join("") : '<p class="revision-empty">No incorrect or self-rated weak answers need revision.</p>'}
-      <div class="revision-footer"><button class="secondary-button" id="revision-back">← Back to results</button>${incorrectAnswers.length ? '<button class="primary-button" id="revision-quiz" type="button" disabled>Explain a weak topic first</button>' : ""}</div>
+function renderMissedAnswerReview(incorrectAnswers) {
+  return `
+    <section class="missed-answer-review card" id="missed-answer-review" aria-labelledby="missed-answer-title">
+      <div class="missed-answer-heading">
+        <div><p class="section-kicker">FOCUSED REVIEW</p><h2 id="missed-answer-title">Missed answers</h2></div>
+        <span>${incorrectAnswers.length} ${incorrectAnswers.length === 1 ? "answer" : "answers"} to review</span>
+      </div>
+      ${incorrectAnswers.map((answer, index) => {
+        const topic = state.topics[answer.topicIndex];
+        const topicTitle = topic?.title || "Study topic";
+        const answerLabel = answer.questionType === "problem" ? "Your attempt:" : "Your answer:";
+        return `
+          <article class="missed-answer-card">
+            <h3>${escapeHtml(topicTitle)} · Question ${index + 1}</h3>
+            <p><strong>Question:</strong> ${escapeHtml(answer.prompt)}</p>
+            <p><strong>${answerLabel}</strong> ${escapeHtml(answer.selectedAnswer || "You marked this problem as needing review.")}</p>
+            <p><strong>Correct answer:</strong> ${escapeHtml(answer.correctAnswer)}</p>
+            <p class="missed-answer-reason"><strong>Why:</strong> ${escapeHtml(answer.explanation)}</p>
+            ${renderSourceEvidence(topic?.content || "", `${answer.prompt} ${answer.explanation}`, answer.sourceExcerpt || "")}
+            <button class="secondary-button explain-missed-answer" data-answer-index="${index}" type="button">Explain this answer again</button>
+            <div class="missed-answer-explanation" id="missed-answer-explanation-${index}" aria-live="polite"></div>
+          </article>`;
+      }).join("")}
     </section>`;
-  document.querySelector("#revision-back").addEventListener("click", () => showView("results"));
-  const revisionQuizButton = document.querySelector("#revision-quiz");
-  if (revisionQuizButton) {
-    revisionQuizButton.addEventListener("click", buildRevisionQuiz);
-  }
-  revisionContent.querySelectorAll(".explain-missed-answer").forEach((button) => {
-    button.addEventListener("click", () => explainMissedAnswer(
-      incorrectAnswers[Number(button.dataset.answerIndex)],
-      button,
-      revisionContent.querySelector(`#missed-answer-explanation-${button.dataset.answerIndex}`),
-    ));
-  });
-  showView("revision");
 }
 
 async function explainMissedAnswer(answer, button, explanationContainer) {
@@ -1961,14 +2073,7 @@ async function explainMissedAnswer(answer, button, explanationContainer) {
       throw new Error(FRIENDLY_ERROR);
     }
     explanationContainer.innerHTML = `<section class="lesson-follow-up"><h4>Here’s why</h4>${splitReadable(result.explanation).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`;
-    state.explainedTopicIndices.add(answer.topicIndex);
     saveProgress(true);
-    const revisionQuizButton = document.querySelector("#revision-quiz");
-    if (revisionQuizButton) {
-      const topicCount = state.explainedTopicIndices.size;
-      revisionQuizButton.disabled = false;
-      revisionQuizButton.textContent = `Check ${topicCount} reviewed topic${topicCount === 1 ? "" : "s"} (${topicCount} question${topicCount === 1 ? "" : "s"})`;
-    }
   } catch (error) {
     console.error("Could not explain the quiz answer.", error);
     explanationContainer.innerHTML = `<p class="lesson-error" role="alert">${FRIENDLY_ERROR}</p>`;
@@ -2196,8 +2301,8 @@ examDateInput.addEventListener("change", () => {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const material = cleanExtractedStudyText(getStudyMaterial());
-  if (!imageMaterialReady && material.split(/\s+/).filter(Boolean).length < 20) {
-    formError.textContent = FRIENDLY_ERROR;
+  if (!material.trim()) {
+    formError.textContent = "Enter an education-related topic, question, or study notes to get started.";
     materialInput.focus();
     return;
   }
@@ -2301,12 +2406,6 @@ navLinks.forEach((link) =>
     if (link.dataset.view === "learn" && state.topics.length) {
       renderLearningRoom();
       showView("learn");
-    } else if (link.dataset.view === "revision") {
-      if (state.answers.length) renderRevision();
-      else {
-        showView("home");
-        showToast("Finish a quick check-in first to get your personal revision plan.");
-      }
     } else if (link.dataset.view === "history") {
       showView("history");
       await loadStudyHistory();
@@ -2320,6 +2419,7 @@ const helpDialog = document.querySelector("#help-dialog");
 document.querySelector("#help-button").addEventListener("click", () => helpDialog.showModal());
 document.querySelector("#close-help").addEventListener("click", () => helpDialog.close());
 document.querySelector("#dialog-done").addEventListener("click", () => helpDialog.close());
+document.querySelector("#save-retry").addEventListener("click", () => saveProgress(true));
 helpDialog.addEventListener("click", (event) => {
   if (event.target === helpDialog) helpDialog.close();
 });
@@ -2327,16 +2427,16 @@ helpDialog.addEventListener("click", (event) => {
 const date = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date());
 document.querySelector("#today-date").textContent = date;
 renderDailyHours(Number(studyDaysInput.value), state.schedule);
-document.querySelector("#auth-toggle").addEventListener("click", () => setAuthMode(authMode === "login" ? "register" : "login"));
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authError.textContent = "";
+  authError.classList.remove("auth-success");
   const submit = document.querySelector("#auth-submit");
   submit.disabled = true;
   const originalText = submit.textContent;
-  submit.textContent = authMode === "register" ? "Creating account…" : "Signing in…";
+  submit.textContent = "Signing in…";
   try {
-    const response = await fetch(`/api/auth/${authMode}`, {
+    const response = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2366,6 +2466,7 @@ document.querySelector("#sign-out").addEventListener("click", async () => {
   await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
   signedIn = false;
   signedInEmail = "";
+  setProgressSaveStatus("", "");
   resetStudyState();
   sessionStorage.removeItem("studybuddy-session");
   appShell.hidden = true;
