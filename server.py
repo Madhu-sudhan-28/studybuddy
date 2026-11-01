@@ -191,7 +191,6 @@ def authenticated_user(handler):
     token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
     now = int(time.time())
     with database_connection() as connection:
-        connection.execute("DELETE FROM login_sessions WHERE expires_at <= ?", (now,))
         return connection.execute(
             "SELECT users.id, users.email FROM login_sessions JOIN users ON users.id = login_sessions.user_id "
             "WHERE token_hash = ? AND expires_at > ?", (token_hash, now),
@@ -473,18 +472,34 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             send_json(self, 404, {"error": "Not found."})
             return
         if request_path == "/api/auth/session":
-            user = authenticated_user(self)
-            progress = None
             with database_connection() as connection:
-                has_accounts = connection.execute("SELECT EXISTS(SELECT 1 FROM users) AS present").fetchone()["present"]
-                if user:
-                    row = connection.execute("SELECT progress_json FROM study_progress WHERE user_id = ?", (user["id"],)).fetchone()
-                if user and row:
-                    try:
-                        progress = json.loads(row["progress_json"])
-                    except json.JSONDecodeError:
-                        progress = None
-            send_json(self, 200, {"authenticated": bool(user), "hasAccounts": has_accounts, "user": {"email": user["email"]} if user else None, "progress": progress})
+                token = session_token_from(self)
+                token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest() if token else ""
+                row = connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM users) AS has_accounts, users.id AS user_id, users.email, "
+                    "study_progress.progress_json FROM (SELECT 1) AS singleton "
+                    "LEFT JOIN login_sessions ON login_sessions.token_hash = ? AND login_sessions.expires_at > ? "
+                    "LEFT JOIN users ON users.id = login_sessions.user_id "
+                    "LEFT JOIN study_progress ON study_progress.user_id = users.id",
+                    (token_hash, int(time.time())),
+                ).fetchone()
+            user = {"id": row["user_id"], "email": row["email"]} if row["user_id"] is not None else None
+            progress = None
+            if user and row["progress_json"]:
+                try:
+                    progress = json.loads(row["progress_json"])
+                except json.JSONDecodeError:
+                    progress = None
+            send_json(
+                self,
+                200,
+                {
+                    "authenticated": bool(user),
+                    "hasAccounts": row["has_accounts"],
+                    "user": {"email": user["email"]} if user else None,
+                    "progress": progress,
+                },
+            )
             return
         if request_path == "/api/history":
             user = authenticated_user(self)
