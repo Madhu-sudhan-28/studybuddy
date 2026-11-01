@@ -12,6 +12,7 @@ const uploadIcon = document.querySelector("#upload-icon");
 const submitButton = form.querySelector('button[type="submit"]');
 const materialHint = document.querySelector("#material-hint");
 const studyDaysInput = document.querySelector("#study-days");
+const examDateInput = document.querySelector("#exam-date");
 const dailyHoursList = document.querySelector("#daily-hours-list");
 const authGate = document.querySelector("#auth-gate");
 const appShell = document.querySelector("#app-shell");
@@ -64,7 +65,13 @@ const state = {
   schedule: [1, 1, 1],
   memoryStyle: "mixed",
   currentLesson: 0,
+  masteryCheckPage: false,
   completedLessons: new Set(),
+  masteryChecks: {},
+  lessonFeedback: {},
+  examDate: "",
+  spacedReviews: {},
+  activeSpacedReview: null,
   questions: [],
   quizTopicIndices: [],
   quizTotalQuestions: 0,
@@ -164,7 +171,13 @@ function progressSnapshot() {
     memoryStyle: state.memoryStyle,
     lessons: state.topics.map((topic) => topic.lesson || null),
     currentLesson: state.currentLesson,
+    masteryCheckPage: state.masteryCheckPage,
     completedLessons: [...state.completedLessons],
+    masteryChecks: state.masteryChecks,
+    lessonFeedback: state.lessonFeedback,
+    examDate: state.examDate,
+    spacedReviews: state.spacedReviews,
+    activeSpacedReview: state.activeSpacedReview,
     questions: state.questions,
     quizTopicIndices: state.quizTopicIndices,
     quizTotalQuestions: state.quizTotalQuestions,
@@ -191,7 +204,14 @@ function resetStudyState() {
   state.schedule = [1, 1, 1];
   state.memoryStyle = "mixed";
   state.currentLesson = 0;
+  state.masteryCheckPage = false;
   state.completedLessons = new Set();
+  state.masteryChecks = {};
+  state.lessonFeedback = {};
+  state.examDate = "";
+  state.spacedReviews = {};
+  state.activeSpacedReview = null;
+  examDateInput.value = "";
   state.questions = [];
   state.quizTopicIndices = [];
   state.quizTotalQuestions = 0;
@@ -220,10 +240,17 @@ function resetStudyState() {
 function saveProgress(immediate = false) {
   if (!signedIn || !state.material) return;
   clearTimeout(saveTimer);
+  const snapshot = progressSnapshot();
+  try {
+    const email = document.querySelector("#profile-email").textContent.trim().toLowerCase();
+    if (email) localStorage.setItem(`studybuddy-progress:${email}`, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn("Could not cache study progress in this browser.", error);
+  }
   const save = () => fetch("/api/progress", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ progress: progressSnapshot() }),
+    body: JSON.stringify({ progress: snapshot }),
   }).then(async (response) => {
     if (!response.ok) throw new Error(`Progress save failed (${response.status}).`);
     const result = await response.json();
@@ -262,6 +289,25 @@ function restoreProgress(saved, persist = true) {
   state.currentLesson = previousIndexToNewIndex.get(oldCurrent) ?? Math.min(oldCurrent, Math.max(state.topics.length - 1, 0));
   state.completedLessons = new Set((Array.isArray(saved.completedLessons) ? saved.completedLessons : [])
     .map((index) => previousIndexToNewIndex.get(index)).filter((index) => Number.isInteger(index) && index >= 0 && index < state.topics.length));
+  state.masteryChecks = saved.masteryChecks && typeof saved.masteryChecks === "object" && !Array.isArray(saved.masteryChecks)
+    ? saved.masteryChecks
+    : {};
+  if (!saved.masteryChecks) state.completedLessons.clear();
+  state.lessonFeedback = saved.lessonFeedback && typeof saved.lessonFeedback === "object" && !Array.isArray(saved.lessonFeedback)
+    ? saved.lessonFeedback
+    : {};
+  state.examDate = typeof saved.examDate === "string" ? saved.examDate : "";
+  examDateInput.value = state.examDate;
+  state.spacedReviews = saved.spacedReviews && typeof saved.spacedReviews === "object" && !Array.isArray(saved.spacedReviews)
+    ? saved.spacedReviews
+    : {};
+  state.activeSpacedReview = saved.activeSpacedReview && Number.isInteger(saved.activeSpacedReview.topicIndex)
+    ? saved.activeSpacedReview
+    : null;
+  const nextIncompleteLesson = state.topics.findIndex((_, index) => !state.completedLessons.has(index));
+  if (nextIncompleteLesson >= 0) state.currentLesson = nextIncompleteLesson;
+  else state.currentLesson = Math.max(state.topics.length - 1, 0);
+  state.masteryCheckPage = saved.masteryCheckPage === true && !state.completedLessons.has(state.currentLesson);
   state.questions = Array.isArray(saved.questions) ? saved.questions : [];
   state.quizTopicIndices = Array.isArray(saved.quizTopicIndices)
     ? saved.quizTopicIndices.filter((index) => Number.isInteger(index) && index >= 0 && index < state.topics.length)
@@ -312,6 +358,9 @@ function restoreProgress(saved, persist = true) {
 
 function setAuthMode(mode) {
   authMode = mode;
+  document.querySelector("#auth-form").hidden = false;
+  document.querySelector("#password-reset-panel").hidden = true;
+  document.querySelector("#forgot-password-open").hidden = mode !== "login";
   const creating = mode === "register";
   document.querySelector("#auth-title").innerHTML = creating
     ? 'Create your <span class="serif-accent">account.</span>'
@@ -326,15 +375,125 @@ function setAuthMode(mode) {
   authError.textContent = "";
 }
 
+function openPasswordReset() {
+  document.querySelector("#reset-email").value = document.querySelector("#auth-email").value.trim();
+  const status = document.querySelector("#password-reset-error");
+  status.textContent = "";
+  status.classList.remove("auth-success");
+  document.querySelector("#password-reset-request-form").hidden = false;
+  document.querySelector("#password-reset-confirm-form").hidden = true;
+  document.querySelector("#reset-email").readOnly = false;
+  document.querySelector("#auth-form").hidden = true;
+  document.querySelector("#password-reset-panel").hidden = false;
+  document.querySelector("#reset-email").focus();
+}
+
+async function sendPasswordResetCode() {
+  const status = document.querySelector("#password-reset-error");
+  const button = document.querySelector("#send-reset-code");
+  status.textContent = "";
+  status.classList.remove("auth-success");
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = "Sending code…";
+  try {
+    const response = await fetch("/api/auth/password-reset/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: document.querySelector("#reset-email").value.trim() }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
+    document.querySelector("#password-reset-request-form").hidden = true;
+    document.querySelector("#password-reset-confirm-form").hidden = false;
+    document.querySelector("#reset-email").readOnly = true;
+    status.textContent = result.message || "If that email matches an account, a verification code has been sent.";
+    status.classList.add("auth-success");
+    document.querySelector("#reset-code").focus();
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+document.querySelector("#forgot-password-open").addEventListener("click", openPasswordReset);
+document.querySelector("#back-to-sign-in").addEventListener("click", () => {
+  document.querySelector("#password-reset-panel").hidden = true;
+  document.querySelector("#auth-form").hidden = false;
+  document.querySelector("#reset-email").readOnly = false;
+  authError.textContent = "";
+  document.querySelector("#auth-email").focus();
+});
+document.querySelector("#password-reset-request-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await sendPasswordResetCode();
+});
+document.querySelector("#password-reset-confirm-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const status = document.querySelector("#password-reset-error");
+  const button = document.querySelector("#confirm-password-reset");
+  const password = document.querySelector("#reset-new-password").value;
+  if (password !== document.querySelector("#reset-confirm-password").value) {
+    status.textContent = "The passwords do not match.";
+    status.classList.remove("auth-success");
+    return;
+  }
+  status.textContent = "";
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = "Resetting password…";
+  try {
+    const response = await fetch("/api/auth/password-reset/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: document.querySelector("#reset-email").value.trim(),
+        code: document.querySelector("#reset-code").value.trim(),
+        password,
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
+    document.querySelector("#password-reset-panel").hidden = true;
+    document.querySelector("#auth-form").hidden = false;
+    document.querySelector("#auth-email").value = document.querySelector("#reset-email").value.trim();
+    document.querySelector("#auth-password").value = "";
+    document.querySelector("#reset-email").readOnly = false;
+    document.querySelector("#reset-code").value = "";
+    document.querySelector("#reset-new-password").value = "";
+    document.querySelector("#reset-confirm-password").value = "";
+    setAuthMode("login");
+    authError.textContent = result.message || "Password reset. Sign in with your new password.";
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+});
+
 async function enterApp(user, progress) {
   signedIn = true;
   authGate.hidden = true;
   appShell.hidden = false;
   document.querySelector("#profile-email").textContent = user.email;
   resetStudyState();
+  let browserProgress = null;
+  try {
+    browserProgress = JSON.parse(localStorage.getItem(`studybuddy-progress:${user.email.trim().toLowerCase()}`) || "null");
+  } catch (error) {
+    console.warn("Could not read the browser's saved study progress.", error);
+  }
+  if (browserProgress && typeof browserProgress.material !== "string") browserProgress = null;
+  const restoredBrowserCopy = Boolean(browserProgress && Number(browserProgress.savedAt) > Number(progress?.savedAt || 0));
+  if (restoredBrowserCopy) {
+    progress = browserProgress;
+  }
   progressRevision = Math.max(progressRevision, Number(progress?.savedAt) || 0);
   let hasSavedProgress = restoreProgress(progress);
-  if (hasSavedProgress && (progress?.material !== state.material || progress?.lessonVersion !== 20 || typeof progress?.inputMaterial !== "string" || cleanExtractedStudyText(cleanLegacyImageInput(progress.inputMaterial)) !== progress.inputMaterial)) {
+  if (hasSavedProgress && (restoredBrowserCopy || progress?.material !== state.material || progress?.lessonVersion !== 20 || typeof progress?.inputMaterial !== "string" || cleanExtractedStudyText(cleanLegacyImageInput(progress.inputMaterial)) !== progress.inputMaterial)) {
     saveProgress(true);
   }
   if (!hasSavedProgress) {
@@ -780,15 +939,30 @@ function resetDailyHoursForImage() {
 
 function buildDailyTopicSchedule(topics, hoursByDay) {
   const days = hoursByDay.map((hours, index) => ({ day: index + 1, hours, topics: [] }));
-  const usedHours = hoursByDay.map(() => 0);
-  topics.forEach((topic, topicIndex) => {
-    const dayIndex = hoursByDay.reduce((bestIndex, hours, index) => {
-      const currentLoad = usedHours[index] / hours;
-      const bestLoad = usedHours[bestIndex] / hoursByDay[bestIndex];
-      return currentLoad < bestLoad ? index : bestIndex;
-    }, 0);
-    days[dayIndex].topics.push({ topic, topicIndex });
-    usedHours[dayIndex] += 1;
+  const topicCounts = days.map(() => 0);
+  if (topics.length < days.length) {
+    for (let index = 0; index < topics.length; index += 1) topicCounts[index] = 1;
+  } else if (days.length) {
+    topicCounts.fill(1);
+    const remainingTopics = topics.length - days.length;
+    const totalHours = hoursByDay.reduce((total, hours) => total + hours, 0);
+    const allocations = hoursByDay.map((hours, index) => {
+      const exact = remainingTopics * hours / totalHours;
+      const whole = Math.floor(exact);
+      topicCounts[index] += whole;
+      return { index, remainder: exact - whole };
+    });
+    const unassigned = topics.length - topicCounts.reduce((total, count) => total + count, 0);
+    allocations.sort((left, right) => right.remainder - left.remainder || left.index - right.index);
+    for (let index = 0; index < unassigned; index += 1) topicCounts[allocations[index].index] += 1;
+  }
+
+  let topicIndex = 0;
+  days.forEach((day, dayIndex) => {
+    for (let count = 0; count < topicCounts[dayIndex]; count += 1) {
+      day.topics.push({ topic: topics[topicIndex], topicIndex });
+      topicIndex += 1;
+    }
   });
   if (topics.length && days.length > topics.length) {
     for (let dayIndex = topics.length; dayIndex < days.length; dayIndex += 1) {
@@ -803,16 +977,21 @@ function formatHours(hours) {
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} ${hours === 1 ? "hour" : "hours"}`;
 }
 
-function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text") {
+function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text", examDate = "") {
   state.planId = createPlanId();
   state.material = material;
   state.inputMaterial = inputMaterial;
   state.inputKind = inputKind;
   state.topics = topics;
   state.schedule = schedule;
+  state.examDate = examDate;
   state.memoryStyle = "mixed";
   state.currentLesson = 0;
   state.completedLessons = new Set();
+  state.masteryChecks = {};
+  state.lessonFeedback = {};
+  state.spacedReviews = {};
+  state.activeSpacedReview = null;
   state.answers = [];
   state.questions = [];
   renderLearningRoom();
@@ -826,6 +1005,103 @@ function lessonMinutes(topicIndex = state.currentLesson) {
   return Math.max(2, Math.floor(((day?.hours || 0.5) * 60 * 0.72) / Math.max(day?.topics.length || 1, 1)));
 }
 
+function isStudyDayLocked(dayNumber) {
+  return buildDailyTopicSchedule(state.topics, state.schedule).some((day) =>
+    day.day < dayNumber && day.topics.some(({ topicIndex, review }) =>
+      !review && !state.completedLessons.has(topicIndex)));
+}
+
+function canOpenLesson(topicIndex) {
+  return topicIndex === state.currentLesson && !state.completedLessons.has(topicIndex);
+}
+
+function renderSpacedReviewList() {
+  const panel = document.querySelector("#spaced-review-list");
+  const dueReviews = Object.entries(state.spacedReviews)
+    .filter(([, review]) => Number(review.dueAt) <= Date.now())
+    .sort((left, right) => Number(left[1].dueAt) - Number(right[1].dueAt));
+  if (!dueReviews.length) {
+    panel.innerHTML = "";
+    return;
+  }
+  panel.innerHTML = `<p class="spaced-review-heading">READY TO REVIEW</p>${dueReviews.map(([topicIndex]) => `<button class="spaced-review-item" type="button" data-spaced-review="${topicIndex}">Quick recall · ${escapeHtml(state.topics[Number(topicIndex)]?.title || "Earlier topic")}</button>`).join("")}`;
+  panel.querySelectorAll("[data-spaced-review]").forEach((button) => button.addEventListener("click", () => startSpacedReview(Number(button.dataset.spacedReview))));
+}
+
+function renderSpacedReviewChallenge() {
+  const container = document.querySelector("#spaced-review-challenge");
+  const active = state.activeSpacedReview;
+  if (!container || !active) return;
+  container.hidden = false;
+  const topic = state.topics[active.topicIndex];
+  if (active.loading) {
+    container.innerHTML = '<p class="lesson-follow-up-loading" role="status">Preparing a fresh recall question…</p>';
+    return;
+  }
+  if (active.error) {
+    container.innerHTML = '<p class="lesson-error" role="alert">Could not prepare this review. Try again.</p><button class="secondary-button" id="retry-spaced-review" type="button">Retry review</button>';
+    container.querySelector("#retry-spaced-review").addEventListener("click", () => startSpacedReview(active.topicIndex));
+    return;
+  }
+  const question = active.question;
+  if (!question) return;
+  if (active.answered) {
+    container.innerHTML = `<strong>${active.correct ? "Nice recall!" : "Let’s revisit this again tomorrow."}</strong><p>${escapeHtml(question.explanation)}</p><button class="secondary-button" id="finish-spaced-review" type="button">Finish review</button>`;
+    container.querySelector("#finish-spaced-review").addEventListener("click", () => finishSpacedReview(active.topicIndex, active.correct));
+    return;
+  }
+  container.innerHTML = `<strong>Spaced review · ${escapeHtml(topic.title)}</strong><p>${escapeHtml(question.prompt)}</p><div class="mastery-options">${question.options.map((option, index) => `<button class="secondary-button ${active.selected === index ? "selected" : ""}" type="button" data-spaced-option="${index}">${escapeHtml(option)}</button>`).join("")}</div><button class="secondary-button" id="answer-spaced-review" type="button" ${Number.isInteger(active.selected) ? "" : "disabled"}>Check recall</button>`;
+  container.querySelectorAll("[data-spaced-option]").forEach((button) => button.addEventListener("click", () => {
+    active.selected = Number(button.dataset.spacedOption);
+    container.querySelectorAll("[data-spaced-option]").forEach((option) => option.classList.toggle("selected", option === button));
+    container.querySelector("#answer-spaced-review").disabled = false;
+    saveProgress();
+  }));
+  container.querySelector("#answer-spaced-review").addEventListener("click", () => {
+    active.correct = active.selected === question.answerIndex;
+    active.answered = true;
+    saveProgress(true);
+    renderSpacedReviewChallenge();
+  });
+}
+
+async function startSpacedReview(topicIndex) {
+  const topic = state.topics[topicIndex];
+  if (!topic) return;
+  state.activeSpacedReview = { topicIndex, loading: true };
+  saveProgress(true);
+  renderLearningRoom();
+  try {
+    const response = await fetch("/api/generate-quiz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "single", questionCount: 1, topics: [{ title: topic.title, lesson: topic.lesson, content: topic.content, topicIndex }] }),
+    });
+    const result = await response.json();
+    const question = result.questions?.[0];
+    if (!response.ok || !question || question.type !== "mcq" || question.options?.length !== 4) throw new Error(FRIENDLY_ERROR);
+    state.activeSpacedReview = { topicIndex, question, selected: null, answered: false };
+    await saveProgress(true);
+  } catch (error) {
+    console.error("Could not prepare spaced review.", error);
+    state.activeSpacedReview = { topicIndex, error: true };
+  }
+  renderLearningRoom();
+}
+
+function finishSpacedReview(topicIndex, correct) {
+  const review = state.spacedReviews[topicIndex];
+  if (!review) return;
+  review.reviewsCompleted = (review.reviewsCompleted || 0) + 1;
+  review.intervalDays = correct ? Math.min(30, Math.max(1, (review.intervalDays || 1) * 2 + 1)) : 1;
+  review.dueAt = Date.now() + review.intervalDays * 86_400_000;
+  review.lastResult = correct ? "recalled" : "needs-review";
+  state.activeSpacedReview = null;
+  saveProgress(true);
+  renderLearningRoom();
+  showToast(correct ? `Next recall scheduled in ${review.intervalDays} days.` : "This topic is back in tomorrow’s review.");
+}
+
 function renderLearningRoom() {
   const list = document.querySelector("#lesson-list");
   list.innerHTML = buildDailyTopicSchedule(state.topics, state.schedule)
@@ -834,7 +1110,7 @@ function renderLearningRoom() {
         <div class="day-plan-heading"><strong>Day ${day.day}</strong><span>${formatHours(day.hours)}</span></div>
         ${day.topics.length
           ? day.topics.map(({ topic, topicIndex, review }) => `
-            <button class="lesson-list-item ${topicIndex === state.currentLesson ? "selected" : ""} ${state.completedLessons.has(topicIndex) ? "completed" : ""}" data-lesson="${topicIndex}" type="button">
+            <button class="lesson-list-item ${topicIndex === state.currentLesson ? "selected" : ""} ${state.completedLessons.has(topicIndex) ? "completed" : ""}" data-lesson="${topicIndex}" type="button" ${!canOpenLesson(topicIndex) || isStudyDayLocked(day.day) ? "disabled title=\"Complete topics in order to unlock this lesson\"" : ""}>
               <span class="lesson-number">${review ? "↻" : state.completedLessons.has(topicIndex) ? "✓" : String(topicIndex + 1).padStart(2, "0")}</span>
               <span class="lesson-item-title">${review ? `Review · ${escapeHtml(topic.title)}` : escapeHtml(topic.title)}</span>
             </button>`).join("")
@@ -844,19 +1120,28 @@ function renderLearningRoom() {
   list.querySelectorAll("[data-lesson]").forEach((button) =>
     button.addEventListener("click", () => {
       state.currentLesson = Number(button.dataset.lesson);
+      state.masteryCheckPage = false;
       renderLearningRoom();
       saveProgress();
     }),
   );
 
+  renderSpacedReviewList();
   const completed = state.completedLessons.size;
+  const progressPercent = state.topics.length
+    ? Math.round((completed / state.topics.length) * 100)
+    : 0;
   document.querySelector("#lesson-progress-count").textContent = `${completed} / ${state.topics.length}`;
-  document.querySelector("#lesson-progress-bar").style.width =
-    `${(completed / Math.max(state.topics.length, 1)) * 100}%`;
+  document.querySelector("#lesson-progress-percent").textContent = `${progressPercent}%`;
+  document.querySelector("#lesson-progress-track").setAttribute("aria-valuenow", String(progressPercent));
+  document.querySelector("#lesson-progress-bar").style.width = `${progressPercent}%`;
   const totalHours = state.schedule.reduce((total, hours) => total + hours, 0);
   document.querySelector("#plan-time-label").textContent = `${state.schedule.length} ${state.schedule.length === 1 ? "day" : "days"} · ${formatHours(totalHours)} total`;
+  const examDateLabel = state.examDate
+    ? ` · Exam ${new Date(`${state.examDate}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+    : "";
   document.querySelector("#lesson-subtitle").textContent =
-    `${state.topics.length} focused lesson pages across ${state.schedule.length} ${state.schedule.length === 1 ? "day" : "days"} · Each page loads when selected`;
+    `${state.topics.length} focused lesson pages across ${state.schedule.length} ${state.schedule.length === 1 ? "day" : "days"}${examDateLabel} · Follow lessons in order`;
 
   const topic = state.topics[state.currentLesson];
   const lessonContent = document.querySelector("#lesson-content");
@@ -866,8 +1151,8 @@ function renderLearningRoom() {
     <p class="lesson-intro">Your allocated study time helps shape the depth of this lesson. Your tutor is preparing connected ideas, a worked example, and a quick self-check.</p>
     <div class="lesson-loading" role="status" aria-live="polite"><span class="lesson-spinner" aria-hidden="true"></span><span>Building your lesson from your study material…</span></div>
   `;
-  document.querySelector("#prev-lesson").disabled = state.currentLesson === 0;
-  document.querySelector("#prev-lesson").style.opacity = state.currentLesson === 0 ? ".5" : "1";
+  document.querySelector("#prev-lesson").disabled = state.currentLesson === 0 || state.completedLessons.size > 0;
+  document.querySelector("#prev-lesson").style.opacity = document.querySelector("#prev-lesson").disabled ? ".5" : "1";
   const nextButton = document.querySelector("#next-lesson");
   nextButton.disabled = true;
   nextButton.innerHTML =
@@ -889,11 +1174,14 @@ async function loadLesson(topic, topicIndex, lessonContent, nextButton) {
   } catch (error) {
     if (state.currentLesson !== topicIndex || state.topics[topicIndex] !== topic) return;
     console.error("Could not load lesson.", error);
+    const lessonError = error instanceof Error && error.message && error.message !== FRIENDLY_ERROR
+      ? error.message
+      : FRIENDLY_ERROR;
     lessonContent.innerHTML = `
       <div class="lesson-meta">LESSON PAGE ${String(topicIndex + 1).padStart(2, "0")} / ${String(state.topics.length).padStart(2, "0")} <span class="lesson-duration">about ${lessonMinutes()} min</span></div>
       <h2>${escapeHtml(topic.title)}</h2>
       <p class="lesson-intro">StudyBuddy couldn’t create the teaching lesson, so it hasn’t replaced it with a planner or raw notes.</p>
-      <div class="lesson-error" role="alert">${FRIENDLY_ERROR}</div>
+      <div class="lesson-error" role="alert">${escapeHtml(lessonError)}</div>
       <button class="secondary-button" id="retry-lesson" type="button">Try lesson again</button>`;
     lessonContent.querySelector("#retry-lesson").addEventListener("click", () => {
       lessonContent.innerHTML = '<div class="lesson-loading" role="status"><span class="lesson-spinner" aria-hidden="true"></span><span>Trying again…</span></div>';
@@ -902,8 +1190,8 @@ async function loadLesson(topic, topicIndex, lessonContent, nextButton) {
   }
 }
 
-function getTopicLesson(topic, retryRateLimit) {
-  if (topic.lesson) return Promise.resolve(topic.lesson);
+function getTopicLesson(topic, retryRateLimit, feedback = "") {
+  if (topic.lesson && !feedback) return Promise.resolve(topic.lesson);
   if (topic.lessonPromise) return topic.lessonPromise;
   topic.lessonPromise = (async () => {
     const topicIndex = state.topics.indexOf(topic);
@@ -916,9 +1204,15 @@ function getTopicLesson(topic, retryRateLimit) {
           topic: topic.title,
           memoryStyle: "A bit of everything",
           minutes: lessonMinutes(topicIndex >= 0 ? topicIndex : state.currentLesson),
+          feedback,
         }),
       });
-      const result = await response.json();
+      let result;
+      try {
+        result = await response.json();
+      } catch {
+        throw new Error(`The lesson service returned an unreadable response (HTTP ${response.status}).`);
+      }
       const requestTooLarge = /request too large|requested output tokens exceed|expected output tokens exceed/i
         .test(result.error || "");
       if (response.status === 429 && attempt === 0 && retryRateLimit && !requestTooLarge) {
@@ -928,7 +1222,9 @@ function getTopicLesson(topic, retryRateLimit) {
         continue;
       }
       if (!response.ok) {
-        throw new Error(FRIENDLY_ERROR);
+        throw new Error(typeof result.error === "string" && result.error.trim()
+          ? result.error
+          : `The lesson service could not create this lesson (HTTP ${response.status}).`);
       }
       if (
         !result.lesson ||
@@ -939,7 +1235,7 @@ function getTopicLesson(topic, retryRateLimit) {
         !Array.isArray(result.lesson.commonMistakes) ||
         !Array.isArray(result.lesson.recap)
       ) {
-        throw new Error(FRIENDLY_ERROR);
+        throw new Error("The lesson service returned an incomplete lesson. Please try again.");
       }
       topic.lesson = result.lesson;
       if (topicIndex >= 0 && !result.lesson.truncated) {
@@ -955,18 +1251,74 @@ function getTopicLesson(topic, retryRateLimit) {
 }
 
 function showLesson(lesson, topic, lessonContent, nextButton) {
+  const lessonIndex = state.currentLesson;
   lessonContent.innerHTML = `
+    <div id="lesson-reading-page">
     <div class="lesson-meta">LESSON PAGE ${String(state.currentLesson + 1).padStart(2, "0")} / ${String(state.topics.length).padStart(2, "0")} <span class="lesson-duration">about ${lessonMinutes()} min</span></div>
     <h2>${escapeHtml(topic.title)}</h2>
     <p class="lesson-intro">A focused lesson page based on your study material.</p>
     ${lesson.truncated ? `<p class="lesson-error" role="status">${FRIENDLY_ERROR}</p><button class="secondary-button" id="retry-short-lesson" type="button">Try lesson again</button>` : ""}
     <section class="lesson-block lesson-detail-section"><h3>Understand this topic</h3>${renderLessonBullets(lesson.content || lesson.explanation)}</section>
     ${renderLessonVisual(lesson.visual, lesson.visualWarning)}
+    <section class="spaced-review-challenge" id="spaced-review-challenge" hidden></section>
     <details class="lesson-source"><summary>Review the notes this lesson is based on</summary><p>${splitReadable(topic.content).map(escapeHtml).join("\n\n")}</p></details>
     <div class="reflection-box"><label for="reflection-input">Which part of this topic would you like explained further?</label><textarea id="reflection-input" rows="2" maxlength="500" placeholder="Name a term, idea, or step you want me to explain…"></textarea><button class="secondary-button" id="explain-part" type="button">Explain this part</button><div class="follow-up-answer" id="follow-up-answer" aria-live="polite"></div></div>
+    <section class="lesson-feedback" id="lesson-feedback"><strong>Was this lesson helpful?</strong><button class="secondary-button" type="button" data-lesson-feedback="helpful">Yes</button><button class="secondary-button" type="button" data-lesson-feedback="needs-work">Needs work</button><span class="lesson-feedback-status" aria-live="polite"></span><textarea rows="2" maxlength="300" placeholder="What should be clearer? (optional)" hidden></textarea></section>
+    </div>
+    <section class="mastery-check" id="mastery-check" aria-live="polite" hidden></section>
   `;
   nextButton.disabled = false;
+  const check = state.masteryChecks[state.currentLesson];
+  const isOnCheckPage = state.masteryCheckPage;
+  lessonContent.querySelector("#lesson-reading-page").hidden = isOnCheckPage;
+  nextButton.textContent = isOnCheckPage
+    ? check?.passed ? "Continue to next topic" : check?.answered ? "Try another check" : "Check answer"
+    : "Continue to mastery check";
+  renderMasteryCheck(topic, state.currentLesson, lessonContent, nextButton);
+  lessonContent.querySelector("#mastery-check").hidden = !isOnCheckPage;
+  renderSpacedReviewChallenge();
   lessonContent.querySelector("#explain-part").addEventListener("click", () => explainLessonPart(topic, lessonContent));
+  const savedFeedback = state.lessonFeedback[state.currentLesson];
+  const feedbackStatus = lessonContent.querySelector(".lesson-feedback-status");
+  const feedbackNote = lessonContent.querySelector(".lesson-feedback textarea");
+  if (savedFeedback) {
+    feedbackStatus.textContent = "Thanks, your feedback is saved.";
+    feedbackNote.hidden = savedFeedback.rating !== "needs-work";
+    feedbackNote.value = savedFeedback.note || "";
+  }
+  lessonContent.querySelectorAll("[data-lesson-feedback]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rating = button.dataset.lessonFeedback;
+      state.lessonFeedback[state.currentLesson] = { rating, note: feedbackNote.value.trim() };
+      feedbackNote.hidden = rating !== "needs-work";
+      feedbackStatus.textContent = "Thanks, your feedback is saved.";
+      saveProgress(true);
+      if (rating === "needs-work") {
+        lessonContent.querySelectorAll("[data-lesson-feedback]").forEach((feedbackButton) => { feedbackButton.disabled = true; });
+        feedbackStatus.textContent = "Updating this lesson based on your feedback…";
+        nextButton.disabled = true;
+        getTopicLesson(topic, true, feedbackNote.value.trim() || "Explain this more clearly using simpler wording and a concrete example.")
+          .then((improvedLesson) => {
+            if (state.currentLesson !== lessonIndex || state.topics[lessonIndex] !== topic) return;
+            showLesson(improvedLesson, topic, lessonContent, nextButton);
+            const status = lessonContent.querySelector(".lesson-feedback-status");
+            if (status) status.textContent = "Lesson updated from your feedback.";
+          })
+          .catch(() => {
+            if (state.topics[state.currentLesson] !== topic) return;
+            lessonContent.querySelectorAll("[data-lesson-feedback]").forEach((feedbackButton) => { feedbackButton.disabled = false; });
+            feedbackStatus.textContent = "Feedback saved, but the lesson could not be updated. Try Needs work again.";
+            nextButton.disabled = false;
+          });
+      }
+    });
+  });
+  feedbackNote.addEventListener("input", () => {
+    const feedback = state.lessonFeedback[state.currentLesson];
+    if (!feedback) return;
+    feedback.note = feedbackNote.value.slice(0, 300);
+    saveProgress();
+  });
   const retryButton = lessonContent.querySelector("#retry-short-lesson");
   if (retryButton) {
     retryButton.addEventListener("click", () => {
@@ -975,6 +1327,89 @@ function showLesson(lesson, topic, lessonContent, nextButton) {
       lessonContent.innerHTML = '<div class="lesson-loading" role="status"><span class="lesson-spinner" aria-hidden="true"></span><span>Retrying this lesson…</span></div>';
       loadLesson(topic, state.currentLesson, lessonContent, nextButton);
     });
+  }
+}
+
+function renderMasteryCheck(topic, topicIndex, lessonContent, nextButton) {
+  const container = lessonContent.querySelector("#mastery-check");
+  const check = state.masteryChecks[topicIndex];
+  if (!check?.question) {
+    container.innerHTML = "<strong>Quick mastery check</strong><p>Answer one question to complete this topic and unlock the next one.</p>";
+    return;
+  }
+  const question = check.question;
+  if (check.passed) {
+    container.innerHTML = `<strong>Topic mastered ✓</strong><p>${escapeHtml(question.explanation)}</p>`;
+    nextButton.textContent = topicIndex === state.topics.length - 1 ? "Continue to final review" : "Continue to next topic";
+    nextButton.disabled = false;
+    return;
+  }
+  container.innerHTML = `
+    <strong>Quick mastery check</strong><p>${escapeHtml(question.prompt)}</p>
+    <div class="mastery-options">${question.options.map((option, index) => `<button class="secondary-button ${check.selected === index ? "selected" : ""} ${check.answered && index === question.answerIndex ? "mastery-correct" : check.answered && index === check.selected ? "mastery-incorrect" : ""}" type="button" data-mastery-option="${index}" ${check.answered ? "disabled" : ""}>${escapeHtml(option)}</button>`).join("")}</div>
+    <p class="mastery-feedback" aria-live="polite">${check.answered ? check.passed ? `Correct. ${escapeHtml(question.explanation)}` : `Not yet. Correct answer: ${escapeHtml(question.options[question.answerIndex])}. ${escapeHtml(question.explanation)}` : "Choose an answer, then check it."}</p>
+    <button class="secondary-button" id="submit-mastery-check" type="button" ${Number.isInteger(check.selected) && !check.answered ? "" : "disabled"}>Check answer</button>
+    ${check.answered ? '<button class="secondary-button" id="retry-mastery-check" type="button">Try another question</button>' : ""}
+  `;
+  container.querySelectorAll("[data-mastery-option]").forEach((button) => button.addEventListener("click", () => {
+    if (check.answered) return;
+    check.selected = Number(button.dataset.masteryOption);
+    container.querySelectorAll("[data-mastery-option]").forEach((option) => option.classList.toggle("selected", option === button));
+    container.querySelector("#submit-mastery-check").disabled = false;
+    saveProgress();
+  }));
+  const submitButton = container.querySelector("#submit-mastery-check");
+  if (!check.answered) submitButton.addEventListener("click", () => {
+    if (!Number.isInteger(check.selected)) return;
+    check.answered = true;
+    check.passed = check.selected === question.answerIndex;
+    check.attempts = (check.attempts || 0) + 1;
+    if (check.passed) {
+      state.completedLessons.add(topicIndex);
+      state.spacedReviews[topicIndex] = state.spacedReviews[topicIndex] || {
+        intervalDays: 1,
+        dueAt: Date.now() + 86_400_000,
+        reviewsCompleted: 0,
+      };
+    }
+    saveProgress(true);
+    renderLearningRoom();
+  });
+  const retryButton = container.querySelector("#retry-mastery-check");
+  if (retryButton) retryButton.addEventListener("click", () => beginMasteryCheck(topic, topicIndex, lessonContent, nextButton));
+  nextButton.textContent = container.hidden
+    ? "Continue to mastery check"
+    : check.answered ? "Try another check" : "Check answer";
+  nextButton.disabled = false;
+}
+
+async function beginMasteryCheck(topic, topicIndex, lessonContent, nextButton) {
+  const existing = state.masteryChecks[topicIndex];
+  nextButton.disabled = true;
+  nextButton.textContent = "Preparing check…";
+  lessonContent.querySelector("#mastery-check").innerHTML = '<p class="lesson-follow-up-loading" role="status">Preparing a question from this lesson…</p>';
+  try {
+    const response = await fetch("/api/generate-quiz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "single",
+        questionCount: 1,
+        topics: [{ title: topic.title, lesson: topic.lesson, content: topic.content, topicIndex }],
+      }),
+    });
+    const result = await response.json();
+    const question = result.questions?.[0];
+    if (!response.ok || !question || question.type !== "mcq" || question.options?.length !== 4) throw new Error(FRIENDLY_ERROR);
+    state.masteryChecks[topicIndex] = { question, attempts: existing?.attempts || 0, selected: null, answered: false, passed: false };
+    await saveProgress(true);
+    renderMasteryCheck(topic, topicIndex, lessonContent, nextButton);
+  } catch (error) {
+    console.error("Could not prepare the mastery check.", error);
+    lessonContent.querySelector("#mastery-check").innerHTML = `<p class="lesson-error" role="alert">${FRIENDLY_ERROR}</p><button class="secondary-button" id="retry-mastery-check" type="button">Try again</button>`;
+    lessonContent.querySelector("#retry-mastery-check").addEventListener("click", () => beginMasteryCheck(topic, topicIndex, lessonContent, nextButton));
+    nextButton.disabled = true;
+    nextButton.textContent = "Check unavailable";
   }
 }
 
@@ -1738,6 +2173,25 @@ studyDaysInput.addEventListener("input", () => {
 dailyHoursList.addEventListener("input", () => {
   if (formError.textContent) formError.textContent = "";
 });
+examDateInput.min = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+examDateInput.addEventListener("change", () => {
+  if (!examDateInput.value) return;
+  const [year, month, day] = examDateInput.value.split("-").map(Number);
+  const examDay = new Date(year, month - 1, day);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysUntilExam = Math.floor((examDay - today) / 86_400_000) + 1;
+  if (daysUntilExam < 1) {
+    formError.textContent = "Choose today or a future exam date.";
+    examDateInput.value = "";
+    return;
+  }
+  const planDays = Math.min(daysUntilExam, MAX_STUDY_DAYS);
+  studyDaysInput.value = String(planDays);
+  renderDailyHours(planDays, readDailyHours());
+  if (daysUntilExam > MAX_STUDY_DAYS) showToast("The plan covers the next 30 days before your exam.");
+  if (formError.textContent) formError.textContent = "";
+});
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1757,6 +2211,14 @@ form.addEventListener("submit", (event) => {
     studyDaysInput.focus();
     return;
   }
+  if (examDateInput.value) {
+    const [year, month, day] = examDateInput.value.split("-").map(Number);
+    if (new Date(year, month - 1, day).setHours(0, 0, 0, 0) < new Date().setHours(0, 0, 0, 0)) {
+      formError.textContent = "Choose today or a future exam date.";
+      examDateInput.focus();
+      return;
+    }
+  }
   const topics = splitIntoTopics(material);
   if (topics.length > MAX_PLAN_TOPICS) {
     formError.textContent = FRIENDLY_ERROR;
@@ -1769,7 +2231,7 @@ form.addEventListener("submit", (event) => {
   const inputKind = imageLessonMaterial
     ? inputMaterial ? "mixed-image" : "visual-image"
     : imageMaterialReady ? "image-text" : "text";
-  createPlan(material, schedule, topics, inputMaterial, inputKind);
+  createPlan(material, schedule, topics, inputMaterial, inputKind, examDateInput.value);
   if (topics.length === 1) {
     showToast("One topic found. Add blank lines between sections for a more detailed plan.");
   } else {
@@ -1778,15 +2240,43 @@ form.addEventListener("submit", (event) => {
 });
 
 document.querySelector("#prev-lesson").addEventListener("click", () => {
-  if (state.currentLesson > 0) {
+  if (state.currentLesson > 0 && state.completedLessons.size === 0) {
     state.currentLesson -= 1;
     renderLearningRoom();
   }
 });
-document.querySelector("#next-lesson").addEventListener("click", () => {
-  state.completedLessons.add(state.currentLesson);
+document.querySelector("#next-lesson").addEventListener("click", async () => {
+  if (!state.completedLessons.has(state.currentLesson)) {
+    const topic = state.topics[state.currentLesson];
+    const content = document.querySelector("#lesson-content");
+    const button = document.querySelector("#next-lesson");
+    const readingPage = content.querySelector("#lesson-reading-page");
+    const checkPage = content.querySelector("#mastery-check");
+    if (!readingPage || !checkPage) {
+      button.disabled = true;
+      console.error("Lesson page controls are missing; reload StudyBuddy to restore the lesson view.");
+      return;
+    }
+    if (checkPage.hidden) {
+      state.masteryCheckPage = true;
+      readingPage.hidden = true;
+      checkPage.hidden = false;
+      saveProgress(true);
+      if (state.masteryChecks[state.currentLesson]?.question) {
+        renderMasteryCheck(topic, state.currentLesson, content, button);
+      } else {
+        await beginMasteryCheck(topic, state.currentLesson, content, button);
+      }
+      return;
+    }
+    if (!state.masteryChecks[state.currentLesson]?.question) {
+      await beginMasteryCheck(topic, state.currentLesson, content, button);
+    }
+    return;
+  }
   if (state.currentLesson < state.topics.length - 1) {
     state.currentLesson += 1;
+    state.masteryCheckPage = false;
     renderLearningRoom();
     saveProgress(true);
   } else {
@@ -1882,5 +2372,21 @@ document.querySelector("#sign-out").addEventListener("click", async () => {
   setAuthMode("login");
   document.querySelector("#auth-password").value = "";
 });
-window.addEventListener("pagehide", () => saveProgress(true));
+window.addEventListener("pagehide", () => {
+  if (!signedIn || !state.material) return;
+  const snapshot = progressSnapshot();
+  const body = JSON.stringify({ progress: snapshot });
+  try {
+    const email = document.querySelector("#profile-email").textContent.trim().toLowerCase();
+    if (email) localStorage.setItem(`studybuddy-progress:${email}`, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn("Could not cache study progress during refresh.", error);
+  }
+  fetch("/api/progress", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch((error) => console.error("Could not save study progress while leaving the page.", error));
+});
 loadSignedInSession();

@@ -31,8 +31,30 @@
         <input class="auth-input" id="auth-password" type="password" autocomplete="current-password" minlength="10" maxlength="256" required />
         <p class="auth-error" id="auth-error" role="alert"></p>
         <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
+        <button class="auth-forgot" id="forgot-password-open" type="button">Forgot password?</button>
         <p class="auth-switch"><span id="auth-switch-prompt">New to StudyBuddy?</span> <button type="button" id="auth-toggle">Create an account</button></p>
       </form>
+      <section class="auth-card auth-reset-card" id="password-reset-panel" aria-labelledby="password-reset-title" hidden>
+        <p class="eyebrow"><span class="eyebrow-line"></span> ACCOUNT RECOVERY</p>
+        <h1 id="password-reset-title">Reset your <span class="serif-accent">password.</span></h1>
+        <p class="auth-copy">We’ll email a one-time verification code to the address linked to your StudyBuddy account.</p>
+        <form id="password-reset-request-form">
+          <label class="field-label" for="reset-email">Account email</label>
+          <input class="auth-input" id="reset-email" type="email" autocomplete="email" maxlength="254" required />
+          <button class="primary-button auth-submit" id="send-reset-code" type="submit">Send verification code</button>
+        </form>
+        <form id="password-reset-confirm-form" hidden>
+          <label class="field-label" for="reset-code">Verification code</label>
+          <input class="auth-input" id="reset-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" required />
+          <label class="field-label" for="reset-new-password">New password</label>
+          <input class="auth-input" id="reset-new-password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required />
+          <label class="field-label" for="reset-confirm-password">Confirm new password</label>
+          <input class="auth-input" id="reset-confirm-password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required />
+          <button class="primary-button auth-submit" id="confirm-password-reset" type="submit">Reset password</button>
+        </form>
+        <p class="auth-error" id="password-reset-error" role="alert"></p>
+        <p class="auth-switch"><button type="button" id="back-to-sign-in">Back to sign in</button></p>
+      </section>
       <p class="auth-footnote">Your study material and progress are saved to your account.</p>
     </section>
     <div class="app-shell" id="app-shell" hidden>
@@ -134,6 +156,10 @@
                     <label class="field-label" for="study-days">How many days do you have?</label>
                     <input class="number-input" id="study-days" type="number" min="1" max="30" step="1" value="3" required aria-describedby="schedule-help" />
                   </div>
+                  <div class="field-group">
+                    <label class="field-label" for="exam-date">Exam date <span class="optional-label">optional</span></label>
+                    <input class="number-input" id="exam-date" type="date" />
+                  </div>
                   <div class="field-group daily-hours-group">
                     <p class="field-label">How many hours can you study each day?</p>
                     <p class="schedule-help" id="schedule-help">Set a different amount for each day. Choose between 0.5 and 12 hours.</p>
@@ -182,8 +208,9 @@
           </div>
           <div class="learning-layout">
             <aside class="lesson-sidebar card">
-              <div class="lesson-list-heading"><span class="section-kicker">YOUR LEARNING PLAN</span><span class="lesson-progress-count" id="lesson-progress-count">0 / 0</span></div>
-              <div class="progress-track"><span id="lesson-progress-bar"></span></div>
+              <div class="lesson-list-heading"><span class="section-kicker">YOUR LEARNING PLAN</span><span class="lesson-progress-summary"><span class="lesson-progress-count" id="lesson-progress-count">0 / 0</span><strong class="lesson-progress-percent" id="lesson-progress-percent">0%</strong></span></div>
+              <div class="progress-track" id="lesson-progress-track" role="progressbar" aria-label="Topics mastered" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="lesson-progress-bar"></span></div>
+              <div id="spaced-review-list" class="spaced-review-list" aria-live="polite"></div>
               <div id="lesson-list" class="lesson-list"></div>
               <div class="plan-time"><span aria-hidden="true">◷</span><span id="plan-time-label">3 days · 3 hours total</span></div>
             </aside>

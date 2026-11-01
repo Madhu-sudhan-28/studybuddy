@@ -1,5 +1,6 @@
 import base64
 from contextlib import contextmanager
+from email.message import EmailMessage
 import hashlib
 import hmac
 import json
@@ -7,6 +8,8 @@ import os
 import random
 import re
 import secrets
+import smtplib
+import ssl
 import sys
 import tempfile
 import threading
@@ -41,6 +44,11 @@ AUTH_COOKIE = "studybuddy_session"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 MAX_PROGRESS_BYTES = 8 * 1024 * 1024
 PASSWORD_ITERATIONS = 310_000
+RESET_CODE_TTL_SECONDS = 10 * 60
+RESET_CODE_RESEND_SECONDS = 60
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_HASH_ITERATIONS = 120_000
+PASSWORD_RESET_EMAIL = "If that email matches a StudyBuddy account, a verification code has been sent."
 
 
 @contextmanager
@@ -137,6 +145,14 @@ def initialize_database():
                 UNIQUE(user_id, plan_id)
             );
             CREATE INDEX IF NOT EXISTS study_history_user_created ON study_history(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS password_reset_codes (
+                email TEXT PRIMARY KEY REFERENCES users(email) ON DELETE CASCADE,
+                salt TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                last_sent_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
         """)
 
 
@@ -231,13 +247,54 @@ def load_local_env():
         name, value = entry.split("=", 1)
         name = name.strip()
         value = value.strip().strip("'\"")
-        if name in {API_KEY_NAME, DATABASE_URL_NAME} and value:
+        if name in {API_KEY_NAME, DATABASE_URL_NAME, "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"} and value:
             if name != API_KEY_NAME or value != "paste-your-groq-api-key-here":
                 os.environ.setdefault(name, value)
 
 
 def get_api_key():
     return os.environ.get(API_KEY_NAME, "").strip()
+
+
+def password_reset_email_settings():
+    host = os.environ.get("SMTP_HOST", "").strip()
+    port_text = os.environ.get("SMTP_PORT", "587").strip()
+    username = os.environ.get("SMTP_USER", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "")
+    sender = os.environ.get("SMTP_FROM", "").strip() or username
+    if not host or not sender or not username or not password:
+        raise RuntimeError("Password reset email is not configured on this server. Contact the site administrator.")
+    try:
+        port = int(port_text)
+    except ValueError as error:
+        raise RuntimeError("Password reset email is not configured correctly. Contact the site administrator.") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError("Password reset email is not configured correctly. Contact the site administrator.")
+    return host, port, username, password, sender
+
+
+def send_password_reset_email(email, code):
+    host, port, username, password, sender = password_reset_email_settings()
+    message = EmailMessage()
+    message["Subject"] = "Your StudyBuddy password reset code"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(
+        f"Your StudyBuddy password reset code is {code}.\n\n"
+        f"It expires in {RESET_CODE_TTL_SECONDS // 60} minutes. If you did not request this, you can ignore this email."
+    )
+    context = ssl.create_default_context()
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as client:
+            client.login(username, password)
+            client.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=20) as client:
+            client.ehlo()
+            client.starttls(context=context)
+            client.ehlo()
+            client.login(username, password)
+            client.send_message(message)
 
 
 def send_json(handler, status, payload, headers=None):
@@ -565,6 +622,117 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             else:
                 raise
 
+    def request_password_reset(self):
+        try:
+            password_reset_email_settings()
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter a valid email address.")
+            now = int(time.time())
+            code = f"{secrets.randbelow(100_000_000):08d}"
+            salt = secrets.token_hex(16)
+            code_hash = hashlib.pbkdf2_hmac(
+                "sha256", code.encode("ascii"), bytes.fromhex(salt), RESET_CODE_HASH_ITERATIONS
+            ).hex()
+            should_send = False
+            with database_connection() as connection:
+                user = connection.execute("SELECT email FROM users WHERE email = ?", (email,)).fetchone()
+                if user:
+                    existing = connection.execute(
+                        "SELECT last_sent_at FROM password_reset_codes WHERE email = ?", (email,)
+                    ).fetchone()
+                    if not existing or now - existing["last_sent_at"] >= RESET_CODE_RESEND_SECONDS:
+                        connection.execute(
+                            "INSERT INTO password_reset_codes(email, salt, code_hash, expires_at, last_sent_at, attempts) "
+                            "VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET "
+                            "salt = excluded.salt, code_hash = excluded.code_hash, expires_at = excluded.expires_at, "
+                            "last_sent_at = excluded.last_sent_at, attempts = 0",
+                            (email, salt, code_hash, now + RESET_CODE_TTL_SECONDS, now),
+                        )
+                        should_send = True
+            if should_send:
+                try:
+                    send_password_reset_email(email, code)
+                except Exception as error:
+                    print(f"Password reset email delivery failed: {type(error).__name__}", file=sys.stderr)
+                    with database_connection() as connection:
+                        connection.execute(
+                            "DELETE FROM password_reset_codes WHERE email = ? AND code_hash = ?", (email, code_hash)
+                        )
+                    send_json(self, 502, {"error": "StudyBuddy could not send the verification email. Please try again later."})
+                    return
+            send_json(self, 200, {"message": PASSWORD_RESET_EMAIL})
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except RuntimeError as error:
+            if "Password reset email" in str(error):
+                send_json(self, 503, {"error": str(error)})
+            else:
+                raise
+        except Exception as error:
+            if is_database_connection_error(error):
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def confirm_password_reset(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            code = payload.get("code", "")
+            password = payload.get("password", "")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter a valid email address.")
+            if not isinstance(code, str) or not re.fullmatch(r"\d{8}", code):
+                raise ValueError("Enter the 8-digit code from your email.")
+            if not isinstance(password, str) or len(password) < 10 or len(password) > 256:
+                raise ValueError("Use a password between 10 and 256 characters.")
+            now = int(time.time())
+            reset_error = None
+            with database_connection() as connection:
+                reset = connection.execute(
+                    "SELECT salt, code_hash, expires_at, attempts FROM password_reset_codes WHERE email = ?",
+                    (email,),
+                ).fetchone()
+                if not reset or reset["expires_at"] <= now or reset["attempts"] >= RESET_CODE_MAX_ATTEMPTS:
+                    connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+                    reset_error = "That code has expired or is invalid. Request a new code and try again."
+                elif not hmac.compare_digest(
+                    hashlib.pbkdf2_hmac(
+                        "sha256", code.encode("ascii"), bytes.fromhex(reset["salt"]), RESET_CODE_HASH_ITERATIONS
+                    ).hex(),
+                    reset["code_hash"],
+                ):
+                    attempts = reset["attempts"] + 1
+                    if attempts >= RESET_CODE_MAX_ATTEMPTS:
+                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+                    else:
+                        connection.execute("UPDATE password_reset_codes SET attempts = ? WHERE email = ?", (attempts, email))
+                    reset_error = "That code is incorrect or expired. Check your email and try again."
+                else:
+                    user = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+                    if not user:
+                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+                        reset_error = "That code has expired or is invalid. Request a new code and try again."
+                    else:
+                        connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), user["id"]))
+                        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+                        connection.execute("DELETE FROM login_sessions WHERE user_id = ?", (user["id"],))
+            if reset_error:
+                send_json(self, 400, {"error": reset_error})
+                return
+            send_json(self, 200, {"message": "Your password has been reset. Sign in with your new password."})
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
     def logout_account(self):
         token = session_token_from(self)
         if token:
@@ -626,7 +794,10 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path in {"/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/progress"}:
+        if path in {
+            "/api/auth/register", "/api/auth/login", "/api/auth/logout",
+            "/api/auth/password-reset/request", "/api/auth/password-reset/confirm", "/api/progress",
+        }:
             if not origin_is_same_site(self):
                 send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
                 return
@@ -636,6 +807,10 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 self.login_account()
             elif path == "/api/auth/logout":
                 self.logout_account()
+            elif path == "/api/auth/password-reset/request":
+                self.request_password_reset()
+            elif path == "/api/auth/password-reset/confirm":
+                self.confirm_password_reset()
             else:
                 self.save_progress()
             return
@@ -1049,6 +1224,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             topic = request_data.get("topic", "")
             memory_style = request_data.get("memoryStyle", "")
             minutes = request_data.get("minutes", 15)
+            feedback = request_data.get("feedback", "")
             if not isinstance(material, str) or not material.strip() or len(material) > MAX_STUDY_TEXT_CHARS:
                 raise ValueError("Add study material under 200,000 characters.")
             if not isinstance(topic, str) or not topic.strip() or len(topic) > 5000:
@@ -1057,6 +1233,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 raise ValueError("The learning preference is invalid. Please rebuild your study plan.")
             if not isinstance(minutes, int) or not 2 <= minutes <= 720:
                 raise ValueError("The lesson time is invalid. Please rebuild your study plan.")
+            if not isinstance(feedback, str) or len(feedback) > 300:
+                raise ValueError("Lesson feedback is invalid.")
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as error:
             send_json(self, 400, {"error": str(error) or "The lesson request is invalid."})
             return
@@ -1095,7 +1273,10 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 "steps with title and detail. A concept map must have kind=concept-map, a title, a center with "
                 "title and detail, and 3-6 branches with title, relation, and detail. Do not return image URLs "
                 "or markdown fences. "
-                f"Planned study time: {minutes} minutes.\n\nTopic: {topic}\nSource:\n{material}"
+                f"Planned study time: {minutes} minutes.\n"
+                f"Learner feedback: {feedback or 'None; create the original lesson.'}\n"
+                "When feedback is provided, revise the teaching explanation to address it directly while staying faithful to the source.\n\n"
+                f"Topic: {topic}\nSource:\n{material}"
             )
         try:
             lesson_content = ""

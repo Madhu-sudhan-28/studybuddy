@@ -62,6 +62,8 @@ class handler(StudyBuddyHandler):
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/logout",
+            "/api/auth/password-reset/request",
+            "/api/auth/password-reset/confirm",
             "/api/progress",
             "/api/extract-image",
             "/api/generate-lesson",

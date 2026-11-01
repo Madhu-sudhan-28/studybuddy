@@ -15,6 +15,11 @@ StudyBuddy uses your Supabase PostgreSQL database for accounts, sessions, study 
    ```text
    GROQ_API_KEY=your-api-key
    DATABASE_URL=your-supabase-postgresql-uri
+   SMTP_HOST=your-mail-provider-host
+   SMTP_PORT=587
+   SMTP_USER=your-mail-provider-username
+   SMTP_PASSWORD=your-mail-provider-app-password
+   SMTP_FROM=your-verified-sender-address
    ```
 
 2. The server requires `DATABASE_URL` and creates its tables in Supabase automatically on startup. Keep the URI private. On Windows, double-click `start-studybuddy.bat`. It starts the server in the background without leaving a terminal window open and opens StudyBuddy in your browser. Users create an account or sign in before using the study tools. To run it in a terminal for troubleshooting, use `python server.py` from this folder.
@@ -22,6 +27,6 @@ StudyBuddy uses your Supabase PostgreSQL database for accounts, sessions, study 
 
 StudyBuddy stores account credentials (as salted password hashes), login sessions, each user's current study plan, and previous plans per account in Supabase. Its tables are created automatically at startup. The 50 most recent previous plans appear in Study history so learners can reopen their lessons and progress. The raw image file is not saved after image analysis; extracted study text is part of the user's saved study plan. Keep the database URI private and back up important data. Existing data from the old local SQLite file is not copied automatically. This local server is not reachable from other devices over the internet.
 
-To let users sign in from anywhere, deploy the Python server to a public host, use HTTPS, set `STUDYBUDDY_HOST=0.0.0.0`, and let the host provide `PORT`. Configure `DATABASE_URL` as a private server environment variable on the host; never put it in browser code. The first version does not include email verification or password reset, so users must keep their account password safe. StudyBuddy sends images and selected lesson excerpts to Groq for analysis and generation; review Groq's data and usage policies before uploading private material.
+To let users sign in from anywhere, deploy the Python server to a public host, use HTTPS, set `STUDYBUDDY_HOST=0.0.0.0`, and let the host provide `PORT`. Configure `DATABASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` as private server environment variables; never put them in browser code. Password recovery sends an 8-digit code to the account email. Codes expire after 10 minutes, allow five attempts, and can be requested once per minute. The password reset flow requires an SMTP account and automatically creates its database table. StudyBuddy sends images and selected lesson excerpts to Groq for analysis and generation; review Groq's data and usage policies before uploading private material.
 
 Supported images include PNG, JPEG, WebP, and GIF. Other formats are converted to JPEG in the browser when the browser can decode them. Text uploads and pasted notes continue to work without a Groq API key.
