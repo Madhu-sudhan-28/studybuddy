@@ -21,21 +21,27 @@
   <body>
     <section class="auth-gate" id="auth-gate" aria-labelledby="auth-title">
       <a class="brand auth-brand" href="#" aria-label="StudyBuddy home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M5.5 8.5c4.1-.9 7.6.1 10.5 2.8v14c-2.9-2.7-6.4-3.7-10.5-2.8v-14Z"/><path d="M26.5 8.5c-4.1-.9-7.6.1-10.5 2.8v14c2.9-2.7 6.4-3.7 10.5-2.8v-14Z"/></svg></span><span>study<span class="brand-accent">buddy</span></span></a>
-      <form class="auth-card" id="auth-form">
+      <form class="auth-card" id="auth-form" novalidate>
         <p class="eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL LEARNING SPACE</p>
         <h1 id="auth-title">Welcome <span class="serif-accent">back.</span></h1>
-        <p class="auth-copy" id="auth-copy">Sign in or create an account with Google, or use an existing password account.</p>
+        <p class="auth-copy" id="auth-copy">Sign in with Google or your email and password.</p>
         <a class="google-sign-in" id="google-sign-in" href="/api/auth/google/start">
           <span class="google-mark" aria-hidden="true">G</span>
           <span>Continue with Google</span>
         </a>
-        <div class="auth-divider"><span>OR SIGN IN WITH PASSWORD</span></div>
+        <div class="auth-divider"><span>OR CONTINUE WITH EMAIL</span></div>
         <label class="field-label" for="auth-email">Email</label>
         <input class="auth-input" id="auth-email" type="email" autocomplete="email" maxlength="254" required />
         <label class="field-label" for="auth-password">Password</label>
-        <input class="auth-input" id="auth-password" type="password" autocomplete="current-password" minlength="10" maxlength="256" required />
+        <input class="auth-input" id="auth-password" type="password" autocomplete="current-password" minlength="8" maxlength="256" required />
+        <p class="auth-password-hint" id="auth-password-hint" hidden>At least 8 characters, including an uppercase letter, a lowercase letter, a number, and a symbol.</p>
+        <div id="auth-confirm-password-field" hidden>
+          <label class="field-label" for="auth-confirm-password">Confirm password</label>
+          <input class="auth-input" id="auth-confirm-password" type="password" autocomplete="new-password" minlength="8" maxlength="256" />
+        </div>
         <p class="auth-error" id="auth-error" role="alert"></p>
         <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
+        <p class="auth-switch"><span id="auth-switch-prompt">New to StudyBuddy?</span> <button type="button" id="auth-toggle">Create an account</button></p>
       </form>
       <p class="auth-footnote">Your study material and progress are saved to your account.</p>
     </section>

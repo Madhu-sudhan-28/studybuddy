@@ -64,6 +64,7 @@ class handler(StudyBuddyHandler):
         self.restore_api_path()
         path = urlsplit(self.path).path
         if path in {
+            "/api/auth/register",
             "/api/auth/login",
             "/api/auth/logout",
             "/api/progress",

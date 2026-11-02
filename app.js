@@ -19,6 +19,7 @@ const appShell = document.querySelector("#app-shell");
 const authForm = document.querySelector("#auth-form");
 const authError = document.querySelector("#auth-error");
 const FRIENDLY_ERROR = "Something went wrong. Please try again.";
+let authMode = "login";
 let signedIn = false;
 let signedInEmail = "";
 let currentView = "home";
@@ -426,13 +427,35 @@ function restoreProgress(saved, persist = true) {
   return true;
 }
 
-function setAuthMode() {
+function setAuthMode(mode = "login") {
+  authMode = mode;
   document.querySelector("#auth-form").hidden = false;
   authError.classList.remove("auth-success");
-  document.querySelector("#auth-title").innerHTML = 'Welcome <span class="serif-accent">back.</span>';
-  document.querySelector("#auth-copy").textContent = "Sign in or create an account with Google, or use an existing password account.";
-  document.querySelector("#auth-submit").textContent = "Sign in";
-  document.querySelector("#auth-password").autocomplete = "current-password";
+  const registering = mode === "register";
+  document.querySelector("#auth-title").innerHTML = registering
+    ? 'Create your <span class="serif-accent">account.</span>'
+    : 'Welcome <span class="serif-accent">back.</span>';
+  document.querySelector("#auth-copy").textContent = registering
+    ? "Create an email account instantly without verification. Password recovery by email isn't available."
+    : "Sign in with Google or your email and password.";
+  document.querySelector("#auth-submit").textContent = registering ? "Create account" : "Sign in";
+  document.querySelector("#auth-switch-prompt").textContent = registering ? "Already have an account?" : "New to StudyBuddy?";
+  document.querySelector("#auth-toggle").textContent = registering ? "Sign in" : "Create an account";
+  document.querySelector("#auth-password").autocomplete = registering ? "new-password" : "current-password";
+  document.querySelector("#auth-password-hint").hidden = !registering;
+  document.querySelector("#auth-password").minLength = registering ? 8 : 10;
+  const confirmPasswordField = document.querySelector("#auth-confirm-password-field");
+  const confirmPassword = document.querySelector("#auth-confirm-password");
+  confirmPasswordField.hidden = !registering;
+  confirmPassword.required = registering;
+  confirmPassword.minLength = 8;
+  document.querySelector("#auth-password").pattern = registering
+    ? "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\\s]).{8,256}"
+    : "";
+  document.querySelector("#auth-password").title = registering
+    ? "Use at least 8 characters with uppercase and lowercase letters, a number, and a symbol."
+    : "";
+  if (!registering) confirmPassword.value = "";
   authError.textContent = "";
 }
 
@@ -521,6 +544,7 @@ async function loadSignedInSession() {
       google_not_configured: "Google sign-in is not configured on this server yet.",
       google_cancelled: "Google sign-in was cancelled.",
       google_invalid_state: "This Google sign-in request expired or could not be verified. Please try again.",
+      google_email_in_use: "This email already has an email-and-password account. Sign in with that method instead.",
       google_failed: "Google sign-in could not be completed. Please try again.",
     };
     if (authErrorCode && authErrors[authErrorCode]) {
@@ -2427,26 +2451,64 @@ helpDialog.addEventListener("click", (event) => {
 const date = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date());
 document.querySelector("#today-date").textContent = date;
 renderDailyHours(Number(studyDaysInput.value), state.schedule);
+document.querySelector("#auth-toggle").addEventListener("click", () => {
+  setAuthMode(authMode === "login" ? "register" : "login");
+});
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authError.textContent = "";
   authError.classList.remove("auth-success");
+  const emailInput = document.querySelector("#auth-email");
+  const passwordInput = document.querySelector("#auth-password");
+  const email = emailInput.value.trim();
+  const password = passwordInput.value;
+  if (!email || !emailInput.validity.valid) {
+    authError.textContent = "Enter a valid email address.";
+    emailInput.focus();
+    return;
+  }
+  if (authMode === "register" && (
+    password.length < 8
+    || password.length > 256
+    || !/[A-Z]/.test(password)
+    || !/[a-z]/.test(password)
+    || !/[0-9]/.test(password)
+    || !/[^A-Za-z0-9\s]/.test(password)
+  )) {
+    authError.textContent = "Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol.";
+    passwordInput.focus();
+    return;
+  }
+  if (authMode === "login" && !passwordInput.validity.valid) {
+    authError.textContent = password.length < 10
+      ? "Enter a password with at least 10 characters."
+      : "Enter your password (up to 256 characters).";
+    passwordInput.focus();
+    return;
+  }
+  if (authMode === "register"
+      && password !== document.querySelector("#auth-confirm-password").value) {
+    authError.textContent = "Passwords do not match.";
+    document.querySelector("#auth-confirm-password").focus();
+    return;
+  }
   const submit = document.querySelector("#auth-submit");
   submit.disabled = true;
   const originalText = submit.textContent;
-  submit.textContent = "Signing in…";
+  submit.textContent = authMode === "register" ? "Creating account…" : "Signing in…";
   try {
-    const response = await fetch("/api/auth/login", {
+    const response = await fetch(`/api/auth/${authMode}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        email: document.querySelector("#auth-email").value.trim(),
-        password: document.querySelector("#auth-password").value,
+        email,
+        password,
       }),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
     document.querySelector("#auth-password").value = "";
+    document.querySelector("#auth-confirm-password").value = "";
     const sessionResponse = await fetch("/api/auth/session", { cache: "no-store" });
     const session = await sessionResponse.json().catch(() => ({}));
     if (!sessionResponse.ok) throw new Error(session.error || FRIENDLY_ERROR);

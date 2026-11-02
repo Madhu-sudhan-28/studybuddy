@@ -78,6 +78,17 @@ def is_database_connection_error(error):
         return False
 
 
+def is_duplicate_email_error(error):
+    try:
+        import psycopg
+        return (
+            isinstance(error, psycopg.errors.UniqueViolation)
+            and error.diag.constraint_name == "users_email_key"
+        )
+    except ImportError:
+        return False
+
+
 class DatabaseConnection:
     """Adapt the server's parameter markers to PostgreSQL's DB-API syntax."""
 
@@ -112,7 +123,8 @@ def initialize_database():
                 id {id_type},
                 email {email_constraint},
                 password_hash TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                auth_provider TEXT NOT NULL DEFAULT 'google'
             );
             CREATE TABLE IF NOT EXISTS login_sessions (
                 token_hash TEXT PRIMARY KEY,
@@ -135,6 +147,9 @@ def initialize_database():
             );
             CREATE INDEX IF NOT EXISTS study_history_user_created ON study_history(user_id, created_at DESC);
         """)
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'google'"
+        )
         updated_at_column = connection.execute(
             "SELECT data_type FROM information_schema.columns "
             "WHERE table_schema = current_schema() AND table_name = 'study_progress' AND column_name = 'updated_at'"
@@ -679,21 +694,42 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             email = email.strip().casefold()
             now = int(time.time())
             token = secrets.token_urlsafe(32)
+            email_in_use = False
             with database_connection() as connection:
-                user = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-                if user:
-                    user_id = user["id"]
-                else:
+                user = connection.execute(
+                    "SELECT id, auth_provider FROM users WHERE email = ?", (email,)
+                ).fetchone()
+                if user and user["auth_provider"] == "password":
+                    email_in_use = True
+                elif not user:
                     cursor = connection.execute(
-                        "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?) "
-                        "ON CONFLICT(email) DO UPDATE SET email = excluded.email RETURNING id",
+                        "INSERT INTO users(email, password_hash, created_at, auth_provider) "
+                        "VALUES (?, ?, ?, 'google') ON CONFLICT(email) DO NOTHING RETURNING id",
                         (email, hash_password(secrets.token_urlsafe(48)), now),
                     )
-                    user_id = cursor.fetchone()["id"]
-                connection.execute(
-                    "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-                    (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
-                )
+                    inserted_user = cursor.fetchone()
+                    if inserted_user:
+                        user_id = inserted_user["id"]
+                    else:
+                        user = connection.execute(
+                            "SELECT id, auth_provider FROM users WHERE email = ?", (email,)
+                        ).fetchone()
+                        if user and user["auth_provider"] == "password":
+                            email_in_use = True
+                        elif user:
+                            user_id = user["id"]
+                        else:
+                            raise RuntimeError("The Google account could not be created.")
+                else:
+                    user_id = user["id"]
+                if not email_in_use:
+                    connection.execute(
+                        "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+                        (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
+                    )
+            if email_in_use:
+                send_redirect(self, "/?auth_error=google_email_in_use", (clear_cookie,))
+                return
             send_redirect(
                 self,
                 "/",
@@ -714,7 +750,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             with database_connection() as connection:
                 user = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
                 if not user:
-                    send_json(self, 401, {"error": "No existing account was found for that email. Check the address or wait for Google sign-in setup to create an account."})
+                    send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
                     return
                 if not verify_password(password, user["password_hash"]):
                     send_json(self, 401, {"error": "That password is incorrect. Please try again."})
@@ -731,6 +767,50 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 send_json(self, 400, {"error": str(error)})
             elif is_database_connection_error(error):
                 print("Account sign-in could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def register_account(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            password = payload.get("password", "")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter a valid email address.")
+            if not isinstance(password, str) or len(password) < 8 or len(password) > 256:
+                raise ValueError("Use a password between 8 and 256 characters.")
+            if (
+                not re.search(r"[A-Z]", password)
+                or not re.search(r"[a-z]", password)
+                or not re.search(r"[0-9]", password)
+                or not re.search(r"[^A-Za-z0-9\s]", password)
+            ):
+                raise ValueError(
+                    "Include an uppercase letter, a lowercase letter, a number, and a symbol in your password."
+                )
+            now = int(time.time())
+            token = secrets.token_urlsafe(32)
+            with database_connection() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO users(email, password_hash, created_at, auth_provider) "
+                    "VALUES (?, ?, ?, 'password') RETURNING id",
+                    (email, hash_password(password), now),
+                )
+                user_id = cursor.fetchone()["id"]
+                connection.execute(
+                    "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+                    (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
+                )
+            send_json(self, 201, {"user": {"email": email}}, {"Set-Cookie": self.session_cookie_value(token)})
+        except Exception as error:
+            if is_duplicate_email_error(error):
+                send_json(self, 409, {"error": "An account with that email already exists. Sign in instead."})
+            elif isinstance(error, ValueError):
+                send_json(self, 400, {"error": str(error)})
+            elif is_database_connection_error(error):
+                print("Account registration could not connect to the database.", file=sys.stderr)
                 send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
             else:
                 raise
@@ -810,25 +890,15 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path in {"/api/auth/register", "/api/auth/register/confirm"}:
-            if not origin_is_same_site(self):
-                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
-            else:
-                send_json(self, 410, {"error": "Create a new account with Google sign-in."})
-            return
-        if path in {"/api/auth/password-reset/request", "/api/auth/password-reset/confirm"}:
-            if not origin_is_same_site(self):
-                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
-            else:
-                send_json(self, 410, {"error": "Password recovery is unavailable for password-only accounts. Sign in with Google if your account is linked."})
-            return
         if path in {
-            "/api/auth/login", "/api/auth/logout", "/api/progress",
+            "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/progress",
         }:
             if not origin_is_same_site(self):
                 send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
                 return
-            if path == "/api/auth/login":
+            if path == "/api/auth/register":
+                self.register_account()
+            elif path == "/api/auth/login":
                 self.login_account()
             elif path == "/api/auth/logout":
                 self.logout_account()
