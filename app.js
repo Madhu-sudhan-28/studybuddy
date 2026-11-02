@@ -453,7 +453,7 @@ function setAuthMode(mode = "login") {
   document.querySelector("#auth-toggle").textContent = registering ? "Sign in" : "Create an account";
   passwordInput.autocomplete = registering ? "new-password" : "current-password";
   document.querySelector("#auth-password-hint").hidden = !registering;
-  passwordInput.minLength = registering ? 8 : 10;
+  passwordInput.minLength = registering ? 8 : 0;
   const confirmPasswordField = document.querySelector("#auth-confirm-password-field");
   confirmPasswordField.hidden = !registering;
   confirmPassword.required = registering;
@@ -2488,10 +2488,8 @@ authForm.addEventListener("submit", async (event) => {
     passwordInput.focus();
     return;
   }
-  if (authMode === "login" && !passwordInput.validity.valid) {
-    authError.textContent = password.length < 10
-      ? "Enter a password with at least 10 characters."
-      : "Enter your password (up to 256 characters).";
+  if (authMode === "login" && (!password || password.length > 256)) {
+    authError.textContent = "Enter your password.";
     passwordInput.focus();
     return;
   }
