@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 128" role="img" aria-labelledby="title">
+  <title id="title">StudyBuddy</title>
+  <rect x="4" y="4" width="120" height="120" rx="31" fill="#E9F0E8"/>
+  <path d="M25 42c14-4 26 0 39 10v45c-13-9-25-13-39-9V42Z" fill="#FFFEFA" stroke="#285D44" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M103 42c-14-4-26 0-39 10v45c13-9 25-13 39-9V42Z" fill="#FFFEFA" stroke="#285D44" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M36 56c7 0 14 3 20 7m-20 8c7 0 14 3 20 7m27-22c-4 0-8 1-11 3m11 5c-4 0-8 1-11 3" fill="none" stroke="#89A783" stroke-width="4" stroke-linecap="round"/>
+  <path d="m87 20 3 7 7 3-7 3-3 7-3-7-7-3 7-3 3-7Z" fill="#D4A64A"/>
+  <text x="146" y="82" fill="#233A32" font-family="Manrope, Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-2.7">study<tspan fill="#72956D">buddy</tspan></text>
+</svg>
