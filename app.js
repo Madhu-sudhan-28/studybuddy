@@ -428,10 +428,20 @@ function restoreProgress(saved, persist = true) {
 }
 
 function setAuthMode(mode = "login") {
+  const modeChanged = authMode !== mode;
   authMode = mode;
   document.querySelector("#auth-form").hidden = false;
   authError.classList.remove("auth-success");
   const registering = mode === "register";
+  const emailInput = document.querySelector("#auth-email");
+  const passwordInput = document.querySelector("#auth-password");
+  const confirmPassword = document.querySelector("#auth-confirm-password");
+  if (modeChanged) {
+    emailInput.value = "";
+    passwordInput.value = "";
+    confirmPassword.value = "";
+  }
+  emailInput.autocomplete = registering ? "email" : "username";
   document.querySelector("#auth-title").innerHTML = registering
     ? 'Create your <span class="serif-accent">account.</span>'
     : 'Welcome <span class="serif-accent">back.</span>';
@@ -441,11 +451,10 @@ function setAuthMode(mode = "login") {
   document.querySelector("#auth-submit").textContent = registering ? "Create account" : "Sign in";
   document.querySelector("#auth-switch-prompt").textContent = registering ? "Already have an account?" : "New to StudyBuddy?";
   document.querySelector("#auth-toggle").textContent = registering ? "Sign in" : "Create an account";
-  document.querySelector("#auth-password").autocomplete = registering ? "new-password" : "current-password";
+  passwordInput.autocomplete = registering ? "new-password" : "current-password";
   document.querySelector("#auth-password-hint").hidden = !registering;
-  document.querySelector("#auth-password").minLength = registering ? 8 : 10;
+  passwordInput.minLength = registering ? 8 : 10;
   const confirmPasswordField = document.querySelector("#auth-confirm-password-field");
-  const confirmPassword = document.querySelector("#auth-confirm-password");
   confirmPasswordField.hidden = !registering;
   confirmPassword.required = registering;
   confirmPassword.minLength = 8;

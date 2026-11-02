@@ -753,7 +753,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
                     return
                 if not verify_password(password, user["password_hash"]):
-                    send_json(self, 401, {"error": "That password is incorrect. Please try again."})
+                    send_json(self, 401, {"error": "Incorrect password. Please enter the correct password and try again."})
                     return
                 now = int(time.time())
                 token = secrets.token_urlsafe(32)
