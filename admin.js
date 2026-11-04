@@ -140,7 +140,7 @@ api("/api/admin/session")
   .then(async (result) => {
     if (!result.configured) {
       showState(false);
-      loginError.textContent = "Admin access is not configured. Set STUDYBUDDY_ADMIN_PASSWORD to a private password with at least 16 characters.";
+      loginError.textContent = "Admin access is not configured. Set STUDYBUDDY_ADMIN_PASSWORD to at least 8 characters, including uppercase and lowercase letters, a number, and a symbol.";
       document.querySelector("#admin-password").disabled = true;
       loginForm.querySelector("button[type=submit]").disabled = true;
       return;

@@ -230,6 +230,17 @@ def admin_password():
     return os.environ.get(ADMIN_PASSWORD_NAME, "")
 
 
+def admin_password_is_configured():
+    password = admin_password()
+    return bool(
+        len(password) >= 8
+        and re.search(r"[A-Z]", password)
+        and re.search(r"[a-z]", password)
+        and re.search(r"[0-9]", password)
+        and re.search(r"[^A-Za-z0-9\s]", password)
+    )
+
+
 def admin_cookie_from(handler):
     for cookie in handler.headers.get("Cookie", "").split(";"):
         name, separator, value = cookie.strip().partition("=")
@@ -255,7 +266,7 @@ def admin_authenticated(handler):
     password = admin_password()
     token = admin_cookie_from(handler)
     parts = token.split(".")
-    if not password or len(parts) != 3:
+    if not admin_password_is_configured() or len(parts) != 3:
         return False
     timestamp_text, nonce, signature = parts
     if not timestamp_text.isdigit() or not nonce:
@@ -713,7 +724,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             send_json(
                 self,
                 200,
-                {"configured": len(admin_password()) >= 16, "authenticated": admin_authenticated(self)},
+                {"configured": admin_password_is_configured(), "authenticated": admin_authenticated(self)},
             )
             return
         if request_path == "/api/admin/stats":
@@ -900,8 +911,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
 
     def admin_login(self):
         password = admin_password()
-        if len(password) < 16:
-            send_json(self, 503, {"error": "Admin access is not configured. Set STUDYBUDDY_ADMIN_PASSWORD to a secret of at least 16 characters."})
+        if not admin_password_is_configured():
+            send_json(self, 503, {"error": "Admin access is not configured. Set STUDYBUDDY_ADMIN_PASSWORD to at least 8 characters, including uppercase and lowercase letters, a number, and a symbol."})
             return
         try:
             payload = self.read_json_body(4096)
