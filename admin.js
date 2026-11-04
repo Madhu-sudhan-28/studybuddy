@@ -134,7 +134,12 @@ function renderUserHistory(result) {
     <article class="history-record">
       <div class="history-record-heading">
         <div><h3>${escapeHtml(item.title)}</h3><small>${dateText(item.createdAt)}</small></div>
-        <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
+        <div class="history-record-actions">
+          <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
+          ${item.images.length
+            ? `<a class="plan-image-thumbnail" href="${escapeHtml(item.images[0].previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(item.images[0].previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
+            : '<span class="plan-image-missing">No saved image</span>'}
+        </div>
       </div>
       <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
     </article>`).join("") : '<p class="empty">No saved study history.</p>';
