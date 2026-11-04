@@ -17,6 +17,8 @@ const userHistoryContent = document.querySelector("#user-history-content");
 const userHistoryError = document.querySelector("#user-history-error");
 const userHistoryCache = new Map();
 const userHistoryImages = new Map();
+const adminRefreshButton = document.querySelector("#admin-refresh");
+let selectedUserId = null;
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
@@ -151,7 +153,8 @@ function renderUserHistory(result) {
   });
 }
 
-async function loadUserHistory(userId) {
+async function loadUserHistory(userId, scrollToPanel = true) {
+  selectedUserId = userId;
   userHistoryError.textContent = "";
   userHistoryContent.innerHTML = '<p class="loading">Loading this user’s history…</p>';
   userHistoryTitle.textContent = "User history";
@@ -159,13 +162,15 @@ async function loadUserHistory(userId) {
   userHistoryCache.clear();
   userHistoryImages.clear();
   userHistoryPanel.hidden = false;
-  userHistoryPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (scrollToPanel) userHistoryPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const result = await api(`/api/admin/users/${userId}/history`);
     renderUserHistory(result);
+    return true;
   } catch (error) {
     userHistoryContent.innerHTML = "";
     userHistoryError.textContent = error.message;
+    return false;
   }
 }
 
@@ -253,13 +258,41 @@ logoutButton.addEventListener("click", async () => {
     pageError.textContent = error.message;
   }
 });
-document.querySelector("#admin-refresh").addEventListener("click", () => loadAdminData().catch((error) => {
-  pageError.textContent = error.message;
-}));
+adminRefreshButton.addEventListener("click", async () => {
+  if (adminRefreshButton.disabled) return;
+  adminRefreshButton.disabled = true;
+  adminRefreshButton.textContent = "Refreshing…";
+  pageError.textContent = "";
+  try {
+    await loadAdminData();
+    if (selectedUserId !== null && !userHistoryPanel.hidden) {
+      const expandedHistoryIds = [...userHistoryContent.querySelectorAll(".user-plan-details:not([hidden])")]
+        .map((details) => Number(details.dataset.planDetails));
+      if (!await loadUserHistory(selectedUserId, false)) {
+        throw new Error(userHistoryError.textContent || "User history could not be refreshed.");
+      }
+      for (const historyId of expandedHistoryIds) {
+        const planButton = userHistoryContent.querySelector(`[data-view-plan="${historyId}"]`);
+        if (planButton) await loadUserPlanDetails(historyId, planButton);
+      }
+    }
+    adminRefreshButton.textContent = "Updated";
+    setTimeout(() => {
+      adminRefreshButton.textContent = "Refresh";
+    }, 1200);
+  } catch (error) {
+    pageError.textContent = error.message;
+    adminRefreshButton.textContent = "Refresh";
+  } finally {
+    adminRefreshButton.disabled = false;
+  }
+});
 document.querySelector("#close-user-history").addEventListener("click", () => {
   userHistoryPanel.hidden = true;
   userHistoryContent.innerHTML = "";
   userHistoryCache.clear();
+  userHistoryImages.clear();
+  selectedUserId = null;
 });
 
 api("/api/admin/session")
