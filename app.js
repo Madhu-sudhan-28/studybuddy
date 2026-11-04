@@ -9,6 +9,8 @@ const fileLabel = document.querySelector("#file-label");
 const fileStatus = document.querySelector("#file-status");
 const imagePreview = document.querySelector("#image-preview");
 const uploadIcon = document.querySelector("#upload-icon");
+const selectedFilesList = document.querySelector("#selected-files");
+const clearFilesButton = document.querySelector("#clear-files");
 const submitButton = form.querySelector('button[type="submit"]');
 const materialHint = document.querySelector("#material-hint");
 const studyDaysInput = document.querySelector("#study-days");
@@ -30,6 +32,7 @@ let progressRevision = Date.now();
 const MAX_STUDY_DAYS = 30;
 const MAX_PLAN_TOPICS = 500;
 const MAX_TOPIC_CHARS = 900;
+const MAX_STUDY_TEXT_CHARS = 200_000;
 
 const memoryStyles = {
   visual: {
@@ -62,6 +65,7 @@ const memoryStyles = {
 const state = {
   planId: null,
   imageId: null,
+  imageIds: [],
   material: "",
   inputMaterial: "",
   inputKind: "text",
@@ -106,9 +110,8 @@ let imagePreviewUrl = "";
 let ocrEnginePromise;
 let visionAvailable = false;
 let imageStorageAvailable = false;
-let imageMaterialReady = false;
-let imageLessonMaterial = "";
-let preparedStudyImage = null;
+let selectedStudyFiles = [];
+let filesProcessing = false;
 
 function showToast(message) {
   toast.textContent = message;
@@ -133,8 +136,8 @@ async function refreshVisionStatus() {
       : "Guided lessons and quizzes are currently unavailable. Images can still be read with basic text recognition.";
     const storageError = typeof status.imageStorageError === "string" ? status.imageStorageError : "";
     document.querySelector("#image-retention-note").textContent = imageStorageAvailable
-      ? "Images used in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored images."
-      : `Private image storage is unavailable${storageError ? `: ${storageError}` : ". You can still study from images, but they will not be saved for later download."}`;
+      ? "Files used in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored files."
+      : `Private file storage is unavailable${storageError ? `: ${storageError}` : ". You can still study, but uploaded files will not be saved for later download."}`;
     return visionAvailable;
   } catch (error) {
     console.error("Could not check image understanding status.", error);
@@ -188,6 +191,7 @@ function progressSnapshot() {
     lessonVersion: 20,
     planId: state.planId,
     imageId: state.imageId,
+    imageIds: [...state.imageIds],
     material: state.material,
     inputMaterial: state.inputMaterial,
     inputKind: state.inputKind,
@@ -222,10 +226,12 @@ function progressSnapshot() {
 function resetStudyState() {
   state.planId = null;
   state.imageId = null;
+  state.imageIds = [];
   state.material = "";
   state.inputMaterial = "";
   state.inputKind = "text";
-  preparedStudyImage = null;
+  selectedStudyFiles = [];
+  filesProcessing = false;
   state.topics = [];
   state.schedule = [1, 1, 1];
   state.memoryStyle = "mixed";
@@ -249,13 +255,12 @@ function resetStudyState() {
   state.selectedOption = null;
   state.problemAnswer = "";
   state.problemSolutionRevealed = false;
-  imageLessonMaterial = "";
-  imageMaterialReady = false;
   materialInput.value = "";
   fileInput.value = "";
   setImagePreview(null);
-  fileLabel.textContent = "Upload one file, or browse";
-  fileStatus.textContent = "Choose an image or text file · up to 10 MB";
+  renderSelectedFiles();
+  fileLabel.innerHTML = 'Add files, <span>browse</span>, or paste an image';
+  fileStatus.textContent = "Images, PDF, DOCX, PPTX, and text · up to 10 MB each";
   studyDaysInput.value = "3";
   renderDailyHours(3, state.schedule);
   updateWordCount();
@@ -330,7 +335,10 @@ function restoreProgress(saved, persist = true) {
   if (!saved || typeof saved.material !== "string" || !saved.material.trim()) return false;
   const originalMaterial = saved.material;
   state.planId = typeof saved.planId === "string" && saved.planId ? saved.planId : createPlanId();
-  state.imageId = Number.isInteger(saved.imageId) && saved.imageId > 0 ? saved.imageId : null;
+  state.imageIds = Array.isArray(saved.imageIds)
+    ? [...new Set(saved.imageIds.filter((id) => Number.isInteger(id) && id > 0))].slice(0, 10)
+    : Number.isInteger(saved.imageId) && saved.imageId > 0 ? [saved.imageId] : [];
+  state.imageId = state.imageIds[0] || null;
   const previousTopics = splitIntoTopics(originalMaterial).slice(0, MAX_PLAN_TOPICS);
   state.material = cleanExtractedStudyText(originalMaterial);
   state.topics = splitIntoTopics(state.material).slice(0, MAX_PLAN_TOPICS);
@@ -538,14 +546,23 @@ async function loadStudyHistory() {
     const { items = [] } = await response.json();
     document.querySelector("#history-count").textContent = `${items.length} saved ${items.length === 1 ? "plan" : "plans"}`;
     historyList.innerHTML = items.length
-      ? items.map((item) => `
-        <article class="history-item">
-          <button class="history-open" type="button" data-history-id="${Number(item.id)}">
-            <span class="history-item-copy"><strong>${escapeHtml(item.title || "Study plan")}</strong><small>${new Date(item.createdAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</small></span>
-            <span class="history-item-action">Open lessons <span aria-hidden="true">→</span></span>
-          </button>
-          ${item.image ? `<div class="history-image"><img src="${escapeHtml(item.image.previewUrl)}" alt="Image saved with this study plan" loading="lazy" /><div><strong>${escapeHtml(item.image.fileName)}</strong><a href="${escapeHtml(item.image.downloadUrl)}">Download image</a></div></div>` : ""}
-        </article>`).join("")
+      ? items.map((item) => {
+        const files = Array.isArray(item.files) ? item.files : item.image ? [item.image] : [];
+        return `
+          <article class="history-item">
+            <button class="history-open" type="button" data-history-id="${Number(item.id)}">
+              <span class="history-item-copy"><strong>${escapeHtml(item.title || "Study plan")}</strong><small>${new Date(item.createdAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</small></span>
+              <span class="history-item-action">Open lessons <span aria-hidden="true">→</span></span>
+            </button>
+            ${files.length ? `<div class="history-files">${files.map((file) => `
+              <div class="history-file">
+                ${file.isImage
+                  ? `<img src="${escapeHtml(file.previewUrl)}" alt="Image saved with this study plan" loading="lazy" />`
+                  : `<span class="history-file-badge">${escapeHtml(file.fileName.split(".").pop().toUpperCase())}</span>`}
+                <div><strong>${escapeHtml(file.fileName)}</strong><a href="${escapeHtml(file.downloadUrl)}">Download file</a></div>
+              </div>`).join("")}</div>` : ""}
+          </article>`;
+      }).join("")
       : '<p class="history-empty">Your earlier plans will appear here when you start a new one.</p>';
     historyList.querySelectorAll(".history-open").forEach((button) => {
       button.addEventListener("click", () => openStudyHistory(Number(button.dataset.historyId)));
@@ -597,19 +614,22 @@ async function loadSignedInSession() {
 }
 
 function updateWordCount() {
-  if (imageLessonMaterial && !materialInput.value.trim()) {
+  const studyMaterial = getStudyMaterial();
+  if (selectedStudyFiles.some((file) => file.visualExplanation) && !materialInput.value.trim()) {
     wordCount.textContent = "Image explanation ready";
     return;
   }
-  const count = materialInput.value.trim().split(/\s+/).filter(Boolean).length;
+  const count = studyMaterial.trim().split(/\s+/).filter(Boolean).length;
   wordCount.textContent = `${count} ${count === 1 ? "word" : "words"}`;
 }
 
 function getStudyMaterial() {
   const visibleText = materialInput.value.trim();
-  if (!imageLessonMaterial) return visibleText;
-  if (!visibleText) return imageLessonMaterial;
-  return `Text extracted from the image:\n${visibleText}\n\nVisual explanation for the lesson:\n${imageLessonMaterial}`;
+  const fileMaterial = selectedStudyFiles.flatMap((file) => [
+    file.extractedText ? `Source file: ${file.fileName}\n${file.extractedText}` : "",
+    file.visualExplanation ? `Visual explanation from ${file.fileName}:\n${file.visualExplanation}` : "",
+  ]).filter(Boolean).join("\n\n");
+  return [fileMaterial, visibleText].filter(Boolean).join("\n\n");
 }
 
 function cleanText(text, fileName = "") {
@@ -710,12 +730,6 @@ function cleanLegacyImageInput(text) {
   return cleaned.replace(/\s+/g, " ").trim();
 }
 
-function isMissingVisionSetup(error) {
-  return error.message.includes("Groq is not configured") ||
-    error.message.includes("Failed to fetch") ||
-    error.message.includes("Image analysis needs the local StudyBuddy server");
-}
-
 function readAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -726,8 +740,21 @@ function readAsDataUrl(file) {
 }
 
 async function prepareImage(file) {
-  const supportedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  if (supportedTypes.includes(file.type)) return file;
+  const supportedExtensions = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+  };
+  if (supportedExtensions[file.type]) {
+    const originalExtension = fileExtension(file.name);
+    if (
+      originalExtension === supportedExtensions[file.type]
+      || (file.type === "image/jpeg" && originalExtension === ".jpeg")
+    ) return file;
+    const baseName = file.name.replace(/\.[^.]+$/, "") || "study-image";
+    return new File([file], `${baseName}${supportedExtensions[file.type]}`, { type: file.type });
+  }
   const imageUrl = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -749,7 +776,8 @@ async function prepareImage(file) {
         0.92,
       );
     });
-    return new File([convertedImage], "study-image.jpg", { type: "image/jpeg" });
+    const baseName = file.name.replace(/\.[^.]+$/, "") || "study-image";
+    return new File([convertedImage], `${baseName}.jpg`, { type: "image/jpeg" });
   } finally {
     URL.revokeObjectURL(imageUrl);
   }
@@ -1013,9 +1041,10 @@ function formatHours(hours) {
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} ${hours === 1 ? "hour" : "hours"}`;
 }
 
-function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text", examDate = "", imageId = null) {
+function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text", examDate = "", imageIds = []) {
   state.planId = createPlanId();
-  state.imageId = imageId;
+  state.imageIds = [...imageIds];
+  state.imageId = state.imageIds[0] || null;
   state.material = material;
   state.inputMaterial = inputMaterial;
   state.inputKind = inputKind;
@@ -1032,6 +1061,12 @@ function createPlan(material, schedule, topics = splitIntoTopics(material), inpu
   state.activeSpacedReview = null;
   state.answers = [];
   state.questions = [];
+  selectedStudyFiles = [];
+  fileInput.value = "";
+  setImagePreview(null);
+  renderSelectedFiles();
+  fileLabel.innerHTML = 'Add files, <span>browse</span>, or paste an image';
+  fileStatus.textContent = "Files saved privately for this study plan.";
   renderLearningRoom();
   showView("learn");
   saveProgress(true);
@@ -2166,134 +2201,278 @@ function shuffle(items) {
 }
 
 materialInput.addEventListener("input", () => {
-  if (fileInput.files?.length) {
-    fileInput.value = "";
-    preparedStudyImage = null;
-    setImagePreview(null);
-    imageLessonMaterial = "";
-    imageMaterialReady = false;
-    fileLabel.textContent = "Upload one file, or browse";
-    fileStatus.textContent = "Using pasted text. Choose an image or file instead to switch sources.";
-    showToast("Using text only. The uploaded file was cleared.");
-  }
   updateWordCount();
   if (formError.textContent) formError.textContent = "";
 });
-fileInput.addEventListener("change", async () => {
-  const file = fileInput.files?.[0];
-  if (!file) return;
-  preparedStudyImage = null;
-  formError.textContent = "";
-  if (file.size > 10 * 1024 * 1024) {
-    formError.textContent = FRIENDLY_ERROR;
-    fileInput.value = "";
-    return;
+function fileExtension(fileName) {
+  return fileName.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+}
+
+function isSupportedImage(file) {
+  return file.type.startsWith("image/") ||
+    /\.(png|jpe?g|webp|bmp|gif|tiff?|avif|heic|heif)$/i.test(file.name);
+}
+
+function renderSelectedFiles() {
+  selectedFilesList.hidden = selectedStudyFiles.length === 0;
+  clearFilesButton.hidden = selectedStudyFiles.length === 0;
+  clearFilesButton.disabled = filesProcessing;
+  selectedFilesList.innerHTML = selectedStudyFiles.map((file, index) => `
+    <li class="selected-file">
+      <span>${escapeHtml(file.fileName)} · ${escapeHtml(file.status || "Ready")}</span>
+      <button type="button" data-remove-file="${index}" ${filesProcessing ? "disabled" : ""}>Remove</button>
+    </li>`).join("");
+  selectedFilesList.querySelectorAll("[data-remove-file]").forEach((button) => {
+    button.addEventListener("click", () => removeSelectedFile(Number(button.dataset.removeFile)));
+  });
+  const firstImage = selectedStudyFiles.find((file) => file.isImage);
+  setImagePreview(firstImage?.previewFile || null);
+  if (!filesProcessing) {
+    fileLabel.textContent = selectedStudyFiles.length
+      ? `${selectedStudyFiles.length} of 10 files selected`
+      : "Add files, browse, or paste an image";
+    fileStatus.textContent = selectedStudyFiles.length
+      ? "Files will be linked to your new study plan."
+      : "Images, PDF, DOCX, PPTX, and text · up to 10 MB each";
   }
-  const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif|tiff?|avif|heic|heif)$/i.test(file.name);
-  const isTextFile = /\.(txt|md|markdown|csv|json|html?)$/i.test(file.name);
-  if (!isImage && !isTextFile) {
-    formError.textContent = FRIENDLY_ERROR;
-    fileInput.value = "";
-    return;
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", ...options });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
-  const replacingText = Boolean(materialInput.value.trim());
-  imageMaterialReady = false;
-  imageLessonMaterial = "";
-  materialInput.value = "";
-  updateWordCount();
-  materialInput.disabled = isImage;
-  setImagePreview(isImage ? file : null);
-  if (replacingText) showToast("Using the uploaded file only. The previous text was cleared.");
-  if (isImage) resetDailyHoursForImage();
-  submitButton.disabled = true;
+  return result;
+}
+
+async function uploadStudyFile(file) {
+  const sign = await requestJson("/api/uploads/sign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileName: file.name, fileSize: file.size }),
+  });
   try {
-    if (isImage) {
-      fileLabel.textContent = file.name;
-      fileStatus.textContent = "Preparing image for visual understanding…";
-      const preparedImage = await prepareImage(file);
-      await visionStatusReady;
-      let usedOcr = !visionAvailable;
-
-      if (!usedOcr) {
-        try {
-          const imageData = await readAsDataUrl(preparedImage);
-          fileStatus.textContent = "Understanding the visible text, diagrams, and other image content…";
-          const response = await fetch("/api/extract-image", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ image: imageData }),
-          });
-          const result = await response.json();
-          if (!response.ok) {
-            if (response.status === 503) {
-              visionAvailable = false;
-              await refreshVisionStatus();
-              usedOcr = true;
-            } else {
-              throw new Error(FRIENDLY_ERROR);
-            }
-          }
-          if (usedOcr) {
-            fileStatus.textContent = "Reading visible text…";
-          } else {
-            const kind = ["text", "visual", "mixed"].includes(result.kind) ? result.kind : "text";
-            const extractedText = cleanExtractedStudyText(String(result.text || "").trim());
-            const visualExplanation = String(result.visualExplanation || "").trim();
-            const visualContext = [
-              kind === "visual" && extractedText ? `Visible labels and captions:\n${extractedText}` : "",
-              visualExplanation,
-            ].filter(Boolean).join("\n\n");
-            imageLessonMaterial = visualContext;
-            materialInput.value = kind === "text" || kind === "mixed" ? extractedText : "";
-          }
-        } catch (error) {
-          if (!isMissingVisionSetup(error)) throw error;
-          usedOcr = true;
-        }
-      }
-
-      if (usedOcr) {
-        fileStatus.textContent = "Image understanding is unavailable. Reading visible text…";
-        materialInput.value = await readImageText(preparedImage, (progress) => {
-          fileStatus.textContent = `Reading visible text… ${progress}%`;
-        });
-      }
-
-      if (!getStudyMaterial()) {
-        fileStatus.textContent = "No useful content was found in that image.";
-        formError.textContent = FRIENDLY_ERROR;
-        updateWordCount();
-        return;
-      }
-      if (usedOcr) {
-        fileStatus.textContent = "Text extracted. Some visual details may not be included.";
-      } else if (imageLessonMaterial && materialInput.value.trim()) {
-        fileStatus.textContent = "Text is in the notes box; visual details will be explained in the lessons.";
-      } else if (imageLessonMaterial) {
-        fileStatus.textContent = "Image understood. Its explanation will be given in the lessons.";
-      } else {
-        fileStatus.textContent = "Text extracted from the image. Review it in the notes box below.";
-      }
-      preparedStudyImage = preparedImage;
-      imageMaterialReady = true;
-    } else {
-      preparedStudyImage = null;
-      materialInput.value = cleanText(await file.text(), file.name).trim();
-      fileLabel.textContent = file.name;
-      fileStatus.textContent = "Text file ready to study.";
-    }
-    updateWordCount();
-    showToast(isImage ? "Study-ready content from your image is ready." : "Your file is ready to study.");
+    const uploadResponse = await fetch(sign.uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": sign.contentType },
+      body: file,
+    });
+    if (!uploadResponse.ok) throw new Error("The file could not be uploaded to private storage. Please try again.");
+    return await requestJson("/api/uploads/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        storagePath: sign.storagePath,
+        fileName: sign.fileName,
+        fileSize: sign.fileSize,
+      }),
+    });
   } catch (error) {
-    console.error(isImage ? "Could not analyze uploaded image." : "Could not read uploaded file.", error);
-    const message = error instanceof Error && error.message !== "Failed to fetch"
-      ? error.message
-      : FRIENDLY_ERROR;
-    formError.textContent = message;
-    fileStatus.textContent = message;
+    try {
+      await requestJson("/api/uploads/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storagePath: sign.storagePath }),
+      });
+    } catch (cleanupError) {
+      console.error("Could not remove an incomplete upload.", cleanupError);
+    }
+    throw error;
+  }
+}
+
+async function compressImageForAnalysis(file) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = objectUrl;
+    await image.decode();
+    const scale = Math.min(1, 2000 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("This browser cannot prepare the image for analysis.");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    let quality = 0.82;
+    let blob;
+    do {
+      blob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (result) => result ? resolve(result) : reject(new Error("This browser could not prepare the image.")),
+          "image/jpeg",
+          quality,
+        );
+      });
+      quality -= 0.15;
+    } while (blob.size > 2.5 * 1024 * 1024 && quality >= 0.37);
+    if (blob.size > 2.5 * 1024 * 1024) throw new Error("This image is too large to analyze. Choose a smaller image.");
+    return new File([blob], "study-image.jpg", { type: "image/jpeg" });
   } finally {
-    materialInput.disabled = false;
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function extractImageMaterial(file) {
+  await refreshVisionStatus();
+  if (!visionAvailable) {
+    return {
+      extractedText: cleanExtractedStudyText(await readImageText(file, () => {})),
+      visualExplanation: "",
+      previewFile: file,
+    };
+  }
+  const analysisImage = await compressImageForAnalysis(file);
+  let result;
+  try {
+    result = await requestJson("/api/extract-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: await readAsDataUrl(analysisImage) }),
+    });
+  } catch (error) {
+    if (error.status !== 503) throw error;
+    visionAvailable = false;
+    await refreshVisionStatus();
+    return {
+      extractedText: cleanExtractedStudyText(await readImageText(file, () => {})),
+      visualExplanation: "",
+      previewFile: file,
+    };
+  }
+  const extractedText = cleanExtractedStudyText(String(result.text || "").trim());
+  const visualExplanation = cleanExtractedStudyText(String(result.visualExplanation || "").trim());
+  if (!extractedText && !visualExplanation) {
+    throw new Error("No useful study content was found in that image.");
+  }
+  return { extractedText, visualExplanation, previewFile: file };
+}
+
+async function removeSelectedFile(index) {
+  const [file] = selectedStudyFiles.splice(index, 1);
+  if (!file) return;
+  if (file.id) {
+    try {
+      await requestJson(`/api/uploads/${file.id}`, { method: "DELETE" });
+    } catch (error) {
+      selectedStudyFiles.splice(index, 0, file);
+      formError.textContent = error.message;
+      renderSelectedFiles();
+      return;
+    }
+  }
+  renderSelectedFiles();
+  updateWordCount();
+}
+
+clearFilesButton.addEventListener("click", async () => {
+  formError.textContent = "";
+  while (selectedStudyFiles.length) {
+    const before = selectedStudyFiles.length;
+    await removeSelectedFile(selectedStudyFiles.length - 1);
+    if (selectedStudyFiles.length === before) break;
+  }
+});
+
+fileInput.addEventListener("change", async () => {
+  const files = [...(fileInput.files || [])];
+  fileInput.value = "";
+  if (!files.length) return;
+  if (filesProcessing) {
+    formError.textContent = "Wait for the current files to finish uploading and processing.";
+    return;
+  }
+  formError.textContent = "";
+  const availableSlots = 10 - selectedStudyFiles.length;
+  if (files.length > availableSlots) {
+    formError.textContent = `You can attach up to 10 files to one study plan. ${availableSlots} slot${availableSlots === 1 ? "" : "s"} remain.`;
+    return;
+  }
+  let validated;
+  try {
+    validated = files.map((file) => {
+      const extension = fileExtension(file.name);
+      const isImage = isSupportedImage(file);
+      const isText = [".txt", ".md", ".markdown", ".csv", ".json", ".html", ".htm"].includes(extension);
+      const isDocument = [".pdf", ".docx", ".pptx"].includes(extension);
+      if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} is larger than 10 MB.`);
+      if (!isImage && !isText && !isDocument) {
+        if ([".doc", ".ppt"].includes(extension)) {
+          throw new Error("Convert older .DOC/.PPT files to PDF, DOCX, or PPTX before uploading.");
+        }
+        throw new Error("Supported files are images, PDF, DOCX, PPTX, and text files.");
+      }
+      return { file, isImage, isText };
+    });
+  } catch (error) {
+    formError.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
+    return;
+  }
+  filesProcessing = true;
+  submitButton.disabled = true;
+  renderSelectedFiles();
+  try {
+    for (const [index, item] of validated.entries()) {
+      let prepared = null;
+      let uploaded = null;
+      const attachment = {
+        fileName: item.file.name,
+        status: "Uploading…",
+        isImage: item.isImage,
+        previewFile: null,
+        id: null,
+        extractedText: "",
+        visualExplanation: "",
+      };
+      selectedStudyFiles.push(attachment);
+      fileStatus.textContent = `Uploading and preparing file ${index + 1} of ${validated.length}: ${item.file.name}`;
+      renderSelectedFiles();
+      try {
+        prepared = item.isImage ? await prepareImage(item.file) : item.file;
+        if (item.isImage) attachment.previewFile = prepared;
+        uploaded = await uploadStudyFile(prepared);
+        attachment.id = uploaded.file.id;
+        attachment.fileName = uploaded.file.fileName;
+        if (item.isImage) {
+          Object.assign(attachment, await extractImageMaterial(prepared));
+        } else if (item.isText) {
+          attachment.extractedText = cleanText(await item.file.text(), item.file.name).trim();
+        } else {
+          attachment.extractedText = String(uploaded.extractedText || "").trim();
+        }
+        if (!attachment.extractedText && !attachment.visualExplanation) {
+          throw new Error(`No readable study content was found in ${item.file.name}.`);
+        }
+        attachment.status = "Ready";
+        if (item.isImage) resetDailyHoursForImage();
+      } catch (error) {
+        if (uploaded?.file?.id) {
+          try {
+            await requestJson(`/api/uploads/${uploaded.file.id}`, { method: "DELETE" });
+          } catch (cleanupError) {
+            console.error("Could not remove a file that failed to process.", cleanupError);
+          }
+        }
+        selectedStudyFiles = selectedStudyFiles.filter((file) => file !== attachment);
+        throw error;
+      }
+      updateWordCount();
+      renderSelectedFiles();
+    }
+    showToast(`${validated.length} ${validated.length === 1 ? "file is" : "files are"} ready to study.`);
+  } catch (error) {
+    console.error("Could not prepare uploaded study files.", error);
+    formError.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
+  } finally {
+    filesProcessing = false;
     submitButton.disabled = false;
+    renderSelectedFiles();
+    updateWordCount();
   }
 });
 
@@ -2328,10 +2507,10 @@ document.addEventListener("paste", (event) => {
   }),
 );
 uploadZone.addEventListener("drop", (event) => {
-  const file = event.dataTransfer?.files?.[0];
-  if (!file) return;
+  const files = [...(event.dataTransfer?.files || [])];
+  if (!files.length) return;
   const transfer = new DataTransfer();
-  transfer.items.add(file);
+  files.forEach((file) => transfer.items.add(file));
   fileInput.files = transfer.files;
   fileInput.dispatchEvent(new Event("change", { bubbles: true }));
 });
@@ -2371,10 +2550,18 @@ examDateInput.addEventListener("change", () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (filesProcessing) {
+    formError.textContent = "Wait for the selected files to finish uploading and processing.";
+    return;
+  }
   const material = cleanExtractedStudyText(getStudyMaterial());
   if (!material.trim()) {
     formError.textContent = "Enter an education-related topic, question, or study notes to get started.";
     materialInput.focus();
+    return;
+  }
+  if (material.length > MAX_STUDY_TEXT_CHARS) {
+    formError.textContent = "The combined study content is too large. Use files with no more than 200,000 characters of extracted text.";
     return;
   }
   const schedule = readDailyHours();
@@ -2404,48 +2591,20 @@ form.addEventListener("submit", async (event) => {
   const inputMaterial = cleanExtractedStudyText(materialInput.value.trim());
   materialInput.value = inputMaterial;
   updateWordCount();
-  const inputKind = imageLessonMaterial
-    ? inputMaterial ? "mixed-image" : "visual-image"
-    : imageMaterialReady ? "image-text" : "text";
-  let imageId = null;
-  let imageSaveWarning = false;
-  if (preparedStudyImage) await refreshVisionStatus();
-  if (preparedStudyImage && imageStorageAvailable) {
-    submitButton.disabled = true;
-    fileStatus.textContent = "Saving your image privately for 30 days…";
-    try {
-      const imageData = await readAsDataUrl(preparedStudyImage);
-      const response = await fetch("/api/images", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: imageData, fileName: preparedStudyImage.name || "study-image" }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-      if (!Number.isInteger(result.image?.id) || result.image.id <= 0) {
-        throw new Error("The image could not be saved to your history.");
-      }
-      imageId = result.image.id;
-      fileStatus.textContent = "Image saved privately for 30 days and linked to this study plan.";
-      preparedStudyImage = null;
-    } catch (error) {
-      console.error("Could not save uploaded image.", error);
-      const reason = error instanceof Error && error.message !== "Failed to fetch"
-        ? error.message
-        : FRIENDLY_ERROR;
-      fileStatus.textContent = `Your study plan will still be created, but the image could not be saved for later. ${reason}`;
-      preparedStudyImage = null;
-      imageSaveWarning = true;
-    }
-  } else if (preparedStudyImage) {
-    fileStatus.textContent = "Image analyzed. It is not saved for later because private image storage is not configured.";
-    preparedStudyImage = null;
+  const hasImages = selectedStudyFiles.some((file) => file.isImage);
+  const hasDocuments = selectedStudyFiles.some((file) => !file.isImage);
+  const inputKind = hasImages
+    ? selectedStudyFiles.some((file) => file.visualExplanation)
+      ? inputMaterial ? "mixed-image" : "visual-image"
+      : "image-text"
+    : hasDocuments ? "document" : "text";
+  const imageIds = selectedStudyFiles.map((file) => file.id).filter(Number.isInteger);
+  if (imageIds.length !== selectedStudyFiles.length) {
+    formError.textContent = "Wait for each selected file to finish uploading before creating the plan.";
+    return;
   }
-  submitButton.disabled = false;
-  createPlan(material, schedule, topics, inputMaterial, inputKind, examDateInput.value, imageId);
-  if (imageSaveWarning) {
-    showToast("Study plan created, but the image was not saved for later.");
-  } else if (topics.length === 1) {
+  createPlan(material, schedule, topics, inputMaterial, inputKind, examDateInput.value, imageIds);
+  if (topics.length === 1) {
     showToast("One topic found. Add blank lines between sections for a more detailed plan.");
   } else {
     showToast(`${topics.length} topics ready. Your learning room is waiting.`);
@@ -2624,6 +2783,13 @@ document.querySelector("#sign-out").addEventListener("click", async () => {
   authGate.hidden = false;
   setAuthMode("login");
   document.querySelector("#auth-password").value = "";
+});
+document.querySelector("#contact-us").addEventListener("click", (event) => {
+  const button = event.currentTarget;
+  const email = document.querySelector("#contact-email");
+  const isExpanded = button.getAttribute("aria-expanded") === "true";
+  button.setAttribute("aria-expanded", String(!isExpanded));
+  email.hidden = isExpanded;
 });
 window.addEventListener("pagehide", () => {
   if (!signedIn || !state.material) return;

@@ -14,6 +14,8 @@ With `GROQ_API_KEY` configured, the Learning room uses Groq's API and `qwen/qwen
 
 StudyBuddy uses your Supabase PostgreSQL database for accounts, sessions, study plans, and history. Python 3.9 or later is required. Install the PostgreSQL driver using `python -m pip install -r requirements.txt`. Optional AI image understanding and lesson generation use Groq's Chat Completions API through the Python backend. Image uploads still work without a Groq key using browser-based OCR, but OCR reads visible English text only; it cannot interpret diagrams or filter irrelevant text.
 
+Learners can attach up to 10 files per plan, each up to 10 MB: PNG, JPEG, WebP, GIF, PDF, DOCX, PPTX, and common text formats. PDF, DOCX, and PPTX text is extracted for the lesson plan; scanned PDFs should be converted to images, and legacy DOC/PPT files should be converted to PDF or modern Office formats first. Original files are held in private Supabase Storage for 30 days and can be downloaded from learner history or the admin dashboard.
+
 1. Install the Python dependency with `python -m pip install -r requirements.txt`. Copy `.env.example` to `.env` and set `DATABASE_URL` to the PostgreSQL URI from your Supabase project's **Session pooler** connection settings. To enable AI lessons, get an API key from your [Groq account](https://console.groq.com/keys) and set `GROQ_API_KEY` too:
 
    ```text

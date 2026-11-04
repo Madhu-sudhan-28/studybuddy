@@ -2,6 +2,7 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import hmac
+from io import BytesIO
 import json
 import os
 import random
@@ -14,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,10 +23,30 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_FILES = 10
 MAX_REQUEST_BYTES = MAX_IMAGE_BYTES * 4 // 3 + 1024 * 1024
 MAX_LESSON_REQUEST_BYTES = 1024 * 1024
 MAX_STUDY_TEXT_CHARS = 200_000
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+UPLOAD_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".html": "text/html",
+    ".htm": "text/html",
+}
+SUPPORTED_UPLOAD_TYPES = set(UPLOAD_TYPES.values())
+MAX_DOCUMENT_TEXT_CHARS = MAX_STUDY_TEXT_CHARS
 MAX_QUIZ_TOPICS = 500
 AI_MODEL = "qwen/qwen3.8-27b"
 VISION_MODEL = "qwen/qwen3.8-27b"
@@ -356,7 +378,7 @@ def ensure_image_bucket():
                 "name": bucket,
                 "public": False,
                 "file_size_limit": MAX_IMAGE_BYTES,
-                "allowed_mime_types": sorted(SUPPORTED_IMAGE_TYPES),
+                "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
             }).encode("utf-8"),
             "application/json",
             allow_statuses=(400, 409),
@@ -365,6 +387,97 @@ def ensure_image_bucket():
             status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
         if status not in {200, 201}:
             raise SupabaseStorageError("Private image storage bucket could not be created.")
+    else:
+        supabase_storage_request(
+            "PUT",
+            bucket_path,
+            json.dumps({
+                "public": False,
+                "file_size_limit": MAX_IMAGE_BYTES,
+                "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
+            }).encode("utf-8"),
+            "application/json",
+        )
+
+
+def extract_document_text(file_bytes, file_name):
+    extension = Path(file_name).suffix.casefold()
+    try:
+        if extension == ".pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(file_bytes))
+            if reader.is_encrypted:
+                raise ValueError("This PDF is password-protected. Upload an unlocked copy.")
+            if len(reader.pages) > 500:
+                raise ValueError("This PDF has more than 500 pages. Split it into smaller files first.")
+            parts = []
+            total = 0
+            for page_number, page in enumerate(reader.pages, start=1):
+                text = (page.extract_text() or "").strip()
+                if text:
+                    section = f"Page {page_number}\n{text}"
+                    remaining = MAX_DOCUMENT_TEXT_CHARS - total
+                    parts.append(section[:remaining])
+                    total += min(len(section), remaining)
+                if total >= MAX_DOCUMENT_TEXT_CHARS:
+                    break
+            extracted = "\n\n".join(parts)
+        elif extension == ".docx":
+            with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+                if sum(item.file_size for item in archive.infolist()) > 40 * 1024 * 1024:
+                    raise ValueError("This document is too large to extract safely.")
+                if "word/document.xml" not in archive.namelist():
+                    raise ValueError("This is not a valid DOCX document.")
+            from docx import Document
+            document = Document(BytesIO(file_bytes))
+            parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            parts.extend(
+                " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                for table in document.tables
+                for row in table.rows
+            )
+            extracted = "\n".join(parts)[:MAX_DOCUMENT_TEXT_CHARS]
+        elif extension == ".pptx":
+            with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+                if sum(item.file_size for item in archive.infolist()) > 40 * 1024 * 1024:
+                    raise ValueError("This presentation is too large to extract safely.")
+                if not any(name.startswith("ppt/slides/slide") and name.endswith(".xml") for name in archive.namelist()):
+                    raise ValueError("This is not a valid PPTX presentation.")
+            from pptx import Presentation
+            presentation = Presentation(BytesIO(file_bytes))
+            if len(presentation.slides) > 500:
+                raise ValueError("This presentation has more than 500 slides. Split it into smaller files first.")
+            parts = []
+            total = 0
+            for slide_number, slide in enumerate(presentation.slides, start=1):
+                slide_text = "\n".join(
+                    shape.text.strip()
+                    for shape in slide.shapes
+                    if shape.has_text_frame and shape.text.strip()
+                )
+                if slide_text:
+                    section = f"Slide {slide_number}\n{slide_text}"
+                    remaining = MAX_DOCUMENT_TEXT_CHARS - total
+                    parts.append(section[:remaining])
+                    total += min(len(section), remaining)
+                if total >= MAX_DOCUMENT_TEXT_CHARS:
+                    break
+            extracted = "\n\n".join(parts)
+        elif extension in {".doc", ".ppt"}:
+            raise ValueError("Convert legacy DOC/PPT files to PDF or modern Office format first.")
+        else:
+            return ""
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(
+            "This file could not be read. Check that it is a valid PDF, DOCX, or PPTX file."
+        ) from error
+    if not extracted.strip():
+        if extension == ".pdf":
+            raise ValueError("No selectable text was found in this PDF. Convert its pages to images and upload them.")
+        raise ValueError("No readable text was found in this document.")
+    return extracted
 
 
 def image_storage_path(path):
@@ -382,17 +495,27 @@ def delete_storage_object(path):
     )
 
 
+def sanitize_upload_file_name(raw_name):
+    if not isinstance(raw_name, str) or len(raw_name) > 512:
+        raise ValueError("The uploaded file name is invalid.")
+    file_name = re.split(r"[\\/]", raw_name)[-1]
+    return re.sub(r"[^A-Za-z0-9._ -]", "_", file_name).strip(" .")[:120] or "study-file"
+
+
 def image_metadata(image):
-    return {
+    metadata = {
         "id": image["id"],
         "fileName": image["file_name"],
         "contentType": image["content_type"],
         "fileSize": image["file_size"],
         "uploadedAt": image["uploaded_at"],
         "expiresAt": image["expires_at"],
-        "previewUrl": f"/api/images/{image['id']}",
         "downloadUrl": f"/api/images/{image['id']}/download",
+        "isImage": image["content_type"] in SUPPORTED_IMAGE_TYPES,
     }
+    if metadata["isImage"]:
+        metadata["previewUrl"] = f"/api/images/{image['id']}"
+    return metadata
 
 
 def set_session_cookie(handler, token, max_age=SESSION_TTL_SECONDS):
@@ -739,7 +862,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "(SELECT COUNT(*) FROM users WHERE is_disabled = FALSE) AS active_users, "
                     "(SELECT COUNT(*) FROM users WHERE is_disabled = TRUE) AS disabled_users, "
                     "(SELECT COUNT(*) FROM study_history) AS study_plans, "
-                    "(SELECT COUNT(*) FROM uploaded_images WHERE expires_at > ?) AS images",
+                    "(SELECT COUNT(*) FROM uploaded_images WHERE expires_at > ?) AS files",
                     (int(time.time()),),
                 ).fetchone()
             send_json(self, 200, {"stats": stats})
@@ -751,7 +874,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             with database_connection() as connection:
                 users = connection.execute(
                     "SELECT users.id, users.email, users.created_at, users.auth_provider, users.is_disabled, "
-                    "COUNT(uploaded_images.id) AS image_count FROM users "
+                    "COUNT(uploaded_images.id) AS file_count FROM users "
                     "LEFT JOIN uploaded_images ON uploaded_images.user_id = users.id "
                     "GROUP BY users.id ORDER BY users.created_at DESC, users.id DESC LIMIT 500"
                 ).fetchall()
@@ -785,7 +908,9 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             images = [
                 dict(
                     image,
-                    previewUrl=f"/api/admin/images/{image['id']}/preview",
+                    isImage=image["content_type"] in SUPPORTED_IMAGE_TYPES,
+                    previewUrl=f"/api/admin/images/{image['id']}/preview"
+                    if image["content_type"] in SUPPORTED_IMAGE_TYPES else None,
                     downloadUrl=f"/api/admin/images/{image['id']}/download",
                 )
                 for image in image_rows
@@ -815,8 +940,12 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 plan_id = row["plan_id"]
                 history_plan_ids.add(plan_id)
                 plan_images = list(images_by_plan.get(plan_id, []))
-                progress_image_id = progress.get("imageId")
-                if isinstance(progress_image_id, int) and not isinstance(progress_image_id, bool):
+                progress_image_ids = progress.get("imageIds")
+                if not isinstance(progress_image_ids, list):
+                    progress_image_ids = [progress.get("imageId")]
+                for progress_image_id in progress_image_ids:
+                    if not isinstance(progress_image_id, int) or isinstance(progress_image_id, bool):
+                        continue
                     progress_image = images_by_id.get(progress_image_id)
                     if progress_image and all(
                         image["id"] != progress_image_id for image in plan_images
@@ -840,7 +969,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 {
                     "user": user,
                     "history": histories,
-                    "unlinkedImages": unlinked_images,
+                    "unlinkedFiles": unlinked_images,
                 },
             )
             return
@@ -877,7 +1006,22 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "JOIN users ON users.id = uploaded_images.user_id "
                     "ORDER BY uploaded_images.uploaded_at DESC, uploaded_images.id DESC LIMIT 500"
                 ).fetchall()
-            send_json(self, 200, {"images": [dict(image, previewUrl=f"/api/admin/images/{image['id']}/preview", downloadUrl=f"/api/admin/images/{image['id']}/download") for image in images]})
+            send_json(
+                self,
+                200,
+                {
+                    "images": [
+                        dict(
+                            image,
+                            isImage=image["content_type"] in SUPPORTED_IMAGE_TYPES,
+                            previewUrl=f"/api/admin/images/{image['id']}/preview"
+                            if image["content_type"] in SUPPORTED_IMAGE_TYPES else None,
+                            downloadUrl=f"/api/admin/images/{image['id']}/download",
+                        )
+                        for image in images
+                    ]
+                },
+            )
             return
         admin_image_match = re.fullmatch(r"/api/admin/images/(\d+)/(preview|download)", request_path)
         if admin_image_match:
@@ -955,17 +1099,42 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     material = progress.get("material") if isinstance(progress.get("material"), str) else ""
                     title = first_title or next((line.strip() for line in material.splitlines() if line.strip()), "Study plan")
                     plan_id = progress.get("planId")
-                    image = connection.execute(
+                    files = connection.execute(
                         "SELECT id, file_name, content_type, file_size, uploaded_at, expires_at "
                         "FROM uploaded_images WHERE user_id = ? AND plan_id = ? AND expires_at > ? "
-                        "ORDER BY uploaded_at DESC LIMIT 1",
+                        "ORDER BY uploaded_at DESC, id DESC",
                         (user["id"], plan_id, now),
-                    ).fetchone() if isinstance(plan_id, str) else None
+                    ).fetchall() if isinstance(plan_id, str) else []
+                    attachments = [image_metadata(file_record) for file_record in files]
+                    stored_file_ids = {file_record["id"] for file_record in attachments}
+                    progress_file_ids = progress.get("imageIds")
+                    if not isinstance(progress_file_ids, list):
+                        progress_file_ids = [progress.get("imageId")]
+                    for file_id in progress_file_ids:
+                        if (
+                            not isinstance(file_id, int)
+                            or isinstance(file_id, bool)
+                            or file_id in stored_file_ids
+                        ):
+                            continue
+                        file_record = connection.execute(
+                            "SELECT id, file_name, content_type, file_size, uploaded_at, expires_at "
+                            "FROM uploaded_images WHERE id = ? AND user_id = ? AND expires_at > ?",
+                            (file_id, user["id"], now),
+                        ).fetchone()
+                        if file_record:
+                            attachments.append(image_metadata(file_record))
+                            stored_file_ids.add(file_id)
+                    first_image = next(
+                        (file_record for file_record in attachments if file_record["isImage"]),
+                        None,
+                    )
                     items.append({
                         "id": row["id"],
                         "title": title[:100],
                         "createdAt": row["created_at"],
-                        "image": image_metadata(image) if image else None,
+                        "files": attachments,
+                        "image": first_image,
                     })
             send_json(self, 200, {"items": items})
             return
@@ -1081,6 +1250,239 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             else:
                 raise
 
+    def create_study_file_upload(self):
+        user = authenticated_user(self)
+        if not user:
+            send_json(self, 401, {"error": "Sign in to upload study files."})
+            return
+        try:
+            payload = self.read_json_body(4096)
+            file_name = sanitize_upload_file_name(payload.get("fileName", ""))
+            extension = Path(file_name).suffix.casefold()
+            content_type = UPLOAD_TYPES.get(extension)
+            file_size = payload.get("fileSize")
+            if not content_type:
+                raise ValueError("Upload PDF, DOCX, PPTX, text, or supported image files. Convert legacy DOC/PPT files first.")
+            if not isinstance(file_size, int) or isinstance(file_size, bool) or not 0 < file_size <= MAX_IMAGE_BYTES:
+                raise ValueError("Each file must be smaller than 10 MB.")
+            ensure_image_bucket()
+            _, _, bucket = supabase_storage_settings()
+            storage_path = f"{user['id']}/{secrets.token_urlsafe(24)}{extension}"
+            signed_path = (
+                f"object/upload/sign/{urllib.parse.quote(bucket, safe='')}/"
+                f"{urllib.parse.quote(storage_path, safe='/')}"
+            )
+            _, response_body = supabase_storage_request(
+                "POST",
+                signed_path,
+                json.dumps({"upsert": False}).encode("utf-8"),
+                "application/json",
+            )
+            try:
+                signed_data = json.loads(response_body)
+            except json.JSONDecodeError as error:
+                raise SupabaseStorageError("Private file storage returned an invalid upload link.") from error
+            if not isinstance(signed_data, dict):
+                raise SupabaseStorageError("Private file storage returned an invalid upload link.")
+            signed_url = next(
+                (
+                    signed_data.get(key)
+                    for key in ("url", "signedURL", "signedUrl")
+                    if isinstance(signed_data.get(key), str) and signed_data.get(key)
+                ),
+                "",
+            )
+            token = signed_data.get("token")
+            if not signed_url and isinstance(token, str) and token:
+                signed_url = f"{signed_path}?token={urllib.parse.quote(token, safe='')}"
+            if not signed_url:
+                raise SupabaseStorageError("Private file storage did not provide an upload link.")
+            base_url, _, _ = supabase_storage_settings()
+            if signed_url.startswith(("https://", "http://")):
+                upload_url = signed_url
+            elif signed_url.startswith("/storage/v1/"):
+                upload_url = f"{base_url}{signed_url}"
+            else:
+                upload_url = f"{base_url}/storage/v1/{signed_url.lstrip('/')}"
+            send_json(
+                self,
+                200,
+                {
+                    "uploadUrl": upload_url,
+                    "storagePath": storage_path,
+                    "fileName": file_name,
+                    "contentType": content_type,
+                    "fileSize": file_size,
+                },
+            )
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except SupabaseStorageError as error:
+            print(f"Study file upload link failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "A private upload link could not be created. Please try again shortly."})
+        except RuntimeError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Study file upload could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def complete_study_file_upload(self):
+        user = authenticated_user(self)
+        if not user:
+            send_json(self, 401, {"error": "Sign in to save files to your study history."})
+            return
+        storage_path = ""
+        object_verified = False
+        try:
+            payload = self.read_json_body(4096)
+            storage_path = payload.get("storagePath", "")
+            file_name = sanitize_upload_file_name(payload.get("fileName", ""))
+            extension = Path(file_name).suffix.casefold()
+            content_type = UPLOAD_TYPES.get(extension)
+            file_size = payload.get("fileSize")
+            if (
+                not content_type
+                or not isinstance(storage_path, str)
+                or not re.fullmatch(rf"{user['id']}/[A-Za-z0-9_-]{{32}}{re.escape(extension)}", storage_path)
+                or not isinstance(file_size, int)
+                or isinstance(file_size, bool)
+                or not 0 < file_size <= MAX_IMAGE_BYTES
+            ):
+                raise ValueError("The uploaded file details are invalid.")
+            _, body = supabase_storage_request(
+                "GET",
+                image_storage_path(storage_path),
+            )
+            object_verified = True
+            if len(body) != file_size:
+                raise ValueError("The uploaded file could not be verified. Please try again.")
+            if extension == ".pdf" and not body.startswith(b"%PDF-"):
+                raise ValueError("That file is not a valid PDF.")
+            if extension in {".docx", ".pptx"} and not body.startswith(b"PK"):
+                raise ValueError("That file is not a valid Office document.")
+            if extension in {".docx", ".pptx", ".pdf"}:
+                extracted_text = extract_document_text(body, file_name)
+            elif content_type.startswith("image/"):
+                if extension == ".png" and not body.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise ValueError("That file is not a valid PNG image.")
+                if extension in {".jpg", ".jpeg"} and not body.startswith(b"\xff\xd8\xff"):
+                    raise ValueError("That file is not a valid JPEG image.")
+                if extension == ".gif" and not body.startswith((b"GIF87a", b"GIF89a")):
+                    raise ValueError("That file is not a valid GIF image.")
+                if extension == ".webp" and not (body.startswith(b"RIFF") and body[8:12] == b"WEBP"):
+                    raise ValueError("That file is not a valid WebP image.")
+                extracted_text = ""
+            else:
+                try:
+                    extracted_text = body.decode("utf-8-sig")
+                except UnicodeDecodeError as error:
+                    raise ValueError("This text file must use UTF-8 encoding.") from error
+            now = int(time.time())
+            try:
+                with database_connection() as connection:
+                    file_record = connection.execute(
+                        "INSERT INTO uploaded_images(user_id, storage_path, file_name, content_type, file_size, uploaded_at, expires_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, file_name, content_type, file_size, uploaded_at, expires_at",
+                        (user["id"], storage_path, file_name, content_type, file_size, now, now + IMAGE_RETENTION_SECONDS),
+                    ).fetchone()
+            except Exception:
+                try:
+                    delete_storage_object(storage_path)
+                except SupabaseStorageError as cleanup_error:
+                    print(f"An unindexed uploaded file could not be removed from storage: {cleanup_error}", file=sys.stderr)
+                raise
+            send_json(
+                self,
+                201,
+                {"file": image_metadata(file_record), "extractedText": extracted_text},
+            )
+        except ValueError as error:
+            if object_verified:
+                try:
+                    delete_storage_object(storage_path)
+                except (RuntimeError, SupabaseStorageError) as cleanup_error:
+                    print(f"An invalid uploaded file could not be removed: {cleanup_error}", file=sys.stderr)
+            send_json(self, 400, {"error": str(error)})
+        except SupabaseStorageError as error:
+            print(f"Study file storage failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The file could not be saved to private storage. Please try again shortly."})
+        except RuntimeError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Study file metadata could not be saved to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def abort_study_file_upload(self):
+        user = authenticated_user(self)
+        if not user:
+            send_json(self, 401, {"error": "Sign in to manage study files."})
+            return
+        try:
+            payload = self.read_json_body(4096)
+            storage_path = payload.get("storagePath", "")
+            if (
+                not isinstance(storage_path, str)
+                or not re.fullmatch(rf"{user['id']}/[A-Za-z0-9_-]{{32}}\.[a-z0-9]+", storage_path)
+            ):
+                raise ValueError("The uploaded file reference is invalid.")
+            with database_connection() as connection:
+                file_record = connection.execute(
+                    "SELECT id, plan_id FROM uploaded_images WHERE user_id = ? AND storage_path = ?",
+                    (user["id"], storage_path),
+                ).fetchone()
+            if file_record and file_record["plan_id"] is not None:
+                raise ValueError("A file already attached to a saved plan cannot be removed here.")
+            delete_storage_object(storage_path)
+            if file_record:
+                with database_connection() as connection:
+                    connection.execute("DELETE FROM uploaded_images WHERE id = ?", (file_record["id"],))
+            send_json(self, 200, {"ok": True})
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except SupabaseStorageError as error:
+            print(f"An incomplete study upload could not be removed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The incomplete upload could not be removed. Please try again."})
+        except RuntimeError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("An incomplete study upload could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def delete_user_study_file(self, file_id):
+        user = authenticated_user(self)
+        if not user:
+            send_json(self, 401, {"error": "Sign in to manage study files."})
+            return
+        with database_connection() as connection:
+            file_record = connection.execute(
+                "SELECT id, storage_path, plan_id FROM uploaded_images WHERE id = ? AND user_id = ?",
+                (file_id, user["id"]),
+            ).fetchone()
+        if not file_record:
+            send_json(self, 404, {"error": "That uploaded file could not be found."})
+            return
+        if file_record["plan_id"] is not None:
+            send_json(self, 409, {"error": "A file attached to a saved plan cannot be removed here."})
+            return
+        try:
+            delete_storage_object(file_record["storage_path"])
+        except (RuntimeError, SupabaseStorageError) as error:
+            print(f"Study file deletion failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The uploaded file could not be removed. Please try again."})
+            return
+        with database_connection() as connection:
+            connection.execute("DELETE FROM uploaded_images WHERE id = ?", (file_id,))
+        send_json(self, 200, {"ok": True})
+
     def upload_study_image(self):
         user = authenticated_user(self)
         if not user:
@@ -1177,7 +1579,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             print(f"Study image download failed: {error}", file=sys.stderr)
             send_json(self, 503, {"error": "The image could not be downloaded right now. Please try again shortly."})
             return
-        disposition = "attachment" if download else "inline"
+        disposition = "attachment" if download or image["content_type"] not in SUPPORTED_IMAGE_TYPES else "inline"
         safe_name = urllib.parse.quote(image["file_name"], safe="")
         self.send_response(200)
         self.send_header("Content-Type", image["content_type"])
@@ -1458,41 +1860,56 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             progress = payload.get("progress")
             if not isinstance(progress, dict):
                 raise ValueError("The study progress is invalid.")
-            progress_json = json.dumps(progress, separators=(",", ":"))
-            if len(progress_json.encode("utf-8")) > MAX_PROGRESS_BYTES:
-                raise ValueError("This study plan is too large to save.")
-            image_id = progress.get("imageId")
-            if image_id is not None and (
-                not isinstance(image_id, int)
-                or isinstance(image_id, bool)
-                or image_id <= 0
-                or not isinstance(progress.get("planId"), str)
+            image_ids = progress.get("imageIds")
+            if image_ids is None:
+                legacy_image_id = progress.get("imageId")
+                image_ids = [legacy_image_id] if legacy_image_id is not None else []
+            if (
+                not isinstance(image_ids, list)
+                or len(image_ids) > MAX_UPLOAD_FILES
+                or any(
+                    not isinstance(image_id, int)
+                    or isinstance(image_id, bool)
+                    or image_id <= 0
+                    for image_id in image_ids
+                )
+                or len(set(image_ids)) != len(image_ids)
+            ):
+                raise ValueError("A study plan can include up to 10 valid uploaded files.")
+            if image_ids and (
+                not isinstance(progress.get("planId"), str)
                 or not progress["planId"].strip()
             ):
-                raise ValueError("The study image reference is invalid.")
+                raise ValueError("The study file reference is invalid.")
             now = int(time.time())
             saved_at = progress.get("savedAt")
             if not isinstance(saved_at, int) or saved_at < 0:
                 saved_at = int(time.time() * 1000)
             with database_connection() as connection:
-                if image_id is not None:
+                active_image_ids = []
+                for image_id in image_ids:
                     image = connection.execute(
                         "SELECT user_id, plan_id, expires_at FROM uploaded_images WHERE id = ?",
                         (image_id,),
                     ).fetchone()
-                    if image and image["user_id"] != user["id"]:
-                        raise ValueError("That image does not belong to this account.")
-                    if image and image["expires_at"] > now:
-                        if image["plan_id"] not in (None, progress["planId"]):
-                            raise ValueError("That image is already linked to another study plan.")
-                        connection.execute(
-                            "UPDATE uploaded_images SET plan_id = ? WHERE id = ? AND user_id = ?",
-                            (progress["planId"], image_id, user["id"]),
-                        )
-                    else:
-                        progress["imageId"] = None
-                        image_id = None
-                        progress_json = json.dumps(progress, separators=(",", ":"))
+                    if not image:
+                        continue
+                    if image["user_id"] != user["id"]:
+                        raise ValueError("An uploaded file does not belong to this account.")
+                    if image["expires_at"] <= now:
+                        continue
+                    if image["plan_id"] not in (None, progress["planId"]):
+                        raise ValueError("An uploaded file is already linked to another study plan.")
+                    connection.execute(
+                        "UPDATE uploaded_images SET plan_id = ? WHERE id = ? AND user_id = ?",
+                        (progress["planId"], image_id, user["id"]),
+                    )
+                    active_image_ids.append(image_id)
+                progress["imageIds"] = active_image_ids
+                progress["imageId"] = active_image_ids[0] if active_image_ids else None
+                progress_json = json.dumps(progress, separators=(",", ":"))
+                if len(progress_json.encode("utf-8")) > MAX_PROGRESS_BYTES:
+                    raise ValueError("This study plan is too large to save.")
                 previous = connection.execute(
                     "SELECT progress_json, updated_at FROM study_progress WHERE user_id = ?",
                     (user["id"],),
@@ -1592,6 +2009,24 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 self.manage_admin_user(int(admin_user_action.group(1)), admin_user_action.group(2))
             else:
                 send_json(self, 404, {"error": "Endpoint not found."})
+            return
+        if path == "/api/uploads/sign":
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                self.create_study_file_upload()
+            return
+        if path == "/api/uploads/complete":
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                self.complete_study_file_upload()
+            return
+        if path == "/api/uploads/abort":
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                self.abort_study_file_upload()
             return
         if path == "/api/images":
             if not origin_is_same_site(self):
@@ -2202,6 +2637,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             return
         image_match = re.fullmatch(r"/api/admin/images/(\d+)", path)
         user_match = re.fullmatch(r"/api/admin/users/(\d+)", path)
+        upload_match = re.fullmatch(r"/api/uploads/(\d+)", path)
         if image_match:
             if not admin_authenticated(self):
                 send_json(self, 401, {"error": "Admin sign-in is required."})
@@ -2209,6 +2645,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             self.delete_stored_image(int(image_match.group(1)))
         elif user_match:
             self.manage_admin_user(int(user_match.group(1)), "delete")
+        elif upload_match:
+            self.delete_user_study_file(int(upload_match.group(1)))
         else:
             send_json(self, 404, {"error": "Endpoint not found."})
 

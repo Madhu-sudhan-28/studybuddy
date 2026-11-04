@@ -46,6 +46,7 @@ form input:focus { outline: 3px solid #94b9a155; border-color: #78987c; }
 .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
 .image-card { min-width: 0; overflow: hidden; border: 1px solid #e8ebe4; border-radius: 9px; background: white; }
 .image-card img { width: 100%; height: 160px; display: block; object-fit: cover; background: #f2f4ef; }
+.file-type-preview { height: 160px; display: grid; place-items: center; background: #f2f4ef; color: #64756a; font-size: 15px; font-weight: 800; letter-spacing: 1px; }
 .image-card-body { padding: 12px; }
 .image-card-body strong, .image-card-body small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .image-card-body small { margin-top: 5px; color: #758279; font-size: 11px; }
@@ -66,6 +67,7 @@ td .danger { color: #a33d32; background: #f9eae7; }
 .history-record-actions { display: flex; align-items: center; gap: 12px; }
 .plan-image-thumbnail { width: 76px; height: 56px; overflow: hidden; border: 1px solid #e8ebe4; border-radius: 7px; background: #f2f4ef; }
 .plan-image-thumbnail img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.plan-image-file { min-width: 76px; padding: 8px; border-radius: 7px; background: #f2f4ef; color: #64756a; font-size: 11px; text-align: center; }
 .plan-image-missing { color: #78857c; font-size: 11px; }
 .history-record-heading h3, .history-uploads h3 { margin: 0 0 5px; font-size: 15px; }
 .history-record-heading small { color: #758279; font-size: 11px; }

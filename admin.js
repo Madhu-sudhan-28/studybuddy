@@ -16,7 +16,7 @@ const userHistoryTitle = document.querySelector("#user-history-title");
 const userHistoryContent = document.querySelector("#user-history-content");
 const userHistoryError = document.querySelector("#user-history-error");
 const userHistoryCache = new Map();
-const userHistoryImages = new Map();
+const userHistoryFiles = new Map();
 const adminRefreshButton = document.querySelector("#admin-refresh");
 let selectedUserId = null;
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
@@ -51,7 +51,7 @@ async function loadAdminData() {
   document.querySelector("#stat-active-users").textContent = stats.active_users;
   document.querySelector("#stat-disabled-users").textContent = stats.disabled_users;
   document.querySelector("#stat-plans").textContent = stats.study_plans;
-  document.querySelector("#stat-images").textContent = stats.images;
+  document.querySelector("#stat-images").textContent = stats.files;
   renderImages(imagesResult.images);
   renderUsers(usersResult.users);
 }
@@ -59,20 +59,22 @@ async function loadAdminData() {
 function renderImages(images) {
   imagesContainer.innerHTML = images.length ? images.map((image) => `
     <article class="image-card">
-      <img src="${escapeHtml(image.previewUrl)}" alt="Uploaded study image" loading="lazy" />
+      ${image.isImage
+        ? `<img src="${escapeHtml(image.previewUrl)}" alt="Uploaded study image" loading="lazy" />`
+        : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>${escapeHtml(image.email)}</small>
         <small>${sizeText(image.file_size)} · expires ${dateText(image.expires_at)}</small>
         <div class="image-actions">
-          <a href="${escapeHtml(image.downloadUrl)}">Download</a>
+          <a href="${escapeHtml(image.downloadUrl)}">Download file</a>
           <button type="button" data-delete-image="${Number(image.id)}">Delete</button>
         </div>
       </div>
-    </article>`).join("") : '<p class="empty">No retained images.</p>';
+    </article>`).join("") : '<p class="empty">No retained files.</p>';
   imagesContainer.querySelectorAll("[data-delete-image]").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("Permanently delete this image?")) return;
+      if (!confirm("Permanently delete this file?")) return;
       try {
         await api(`/api/admin/images/${Number(button.dataset.deleteImage)}`, { method: "DELETE" });
         await loadAdminData();
@@ -89,7 +91,7 @@ function renderUsers(users) {
       <td><button class="user-history-link" type="button" data-user-history="${Number(user.id)}">${escapeHtml(user.email)}</button></td>
       <td>${escapeHtml(user.auth_provider)}</td>
       <td>${dateText(user.created_at)}</td>
-      <td>${Number(user.image_count)}</td>
+      <td>${Number(user.file_count)}</td>
       <td>${user.is_disabled ? "Disabled" : "Active"}</td>
       <td class="actions">
         <button class="button secondary" type="button" data-user-action="${user.is_disabled ? "enable" : "disable"}" data-user-id="${Number(user.id)}">${user.is_disabled ? "Enable" : "Disable"}</button>
@@ -119,13 +121,15 @@ function renderUsers(users) {
 function renderHistoryImages(images) {
   return images.length ? `<div class="image-grid">${images.map((image) => `
     <article class="image-card">
-      <img src="${escapeHtml(image.previewUrl)}" alt="Image uploaded by this user" loading="lazy" />
+      ${image.isImage
+        ? `<img src="${escapeHtml(image.previewUrl)}" alt="Image uploaded by this user" loading="lazy" />`
+        : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
-        <small>Uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
-        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download to device</a></div>
+        <small>${sizeText(image.file_size)} · uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
+        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download file</a></div>
       </div>
-    </article>`).join("")}</div>` : '<p class="empty">No retained images.</p>';
+    </article>`).join("")}</div>` : '<p class="empty">No retained files.</p>';
 }
 
 function renderUserHistory(result) {
@@ -136,18 +140,20 @@ function renderUserHistory(result) {
         <div><h3>${escapeHtml(item.title)}</h3><small>${dateText(item.createdAt)}</small></div>
         <div class="history-record-actions">
           <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
-          ${item.images.length
-            ? `<a class="plan-image-thumbnail" href="${escapeHtml(item.images[0].previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(item.images[0].previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
-            : '<span class="plan-image-missing">No saved image</span>'}
+          ${item.images.some((file) => file.isImage)
+            ? `<a class="plan-image-thumbnail" href="${escapeHtml(item.images.find((file) => file.isImage).previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(item.images.find((file) => file.isImage).previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
+            : item.images.length
+              ? `<span class="plan-image-file" aria-label="Plan has uploaded files">${item.images.length} file${item.images.length === 1 ? "" : "s"}</span>`
+              : '<span class="plan-image-missing">No saved files</span>'}
         </div>
       </div>
       <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
     </article>`).join("") : '<p class="empty">No saved study history.</p>';
-  userHistoryImages.clear();
-  result.history.forEach((item) => userHistoryImages.set(Number(item.id), item.images));
-  const unlinkedImages = result.unlinkedImages.length ? `
+  userHistoryFiles.clear();
+  result.history.forEach((item) => userHistoryFiles.set(Number(item.id), item.images));
+  const unlinkedImages = result.unlinkedFiles.length ? `
     <section class="history-uploads">
-      <h3>Other retained uploads</h3>${renderHistoryImages(result.unlinkedImages)}
+      <h3>Other retained files</h3>${renderHistoryImages(result.unlinkedFiles)}
     </section>` : "";
   userHistoryContent.innerHTML = `${histories}${unlinkedImages}`;
   userHistoryContent.querySelectorAll("[data-view-plan]").forEach((button) => {
@@ -165,7 +171,7 @@ async function loadUserHistory(userId, scrollToPanel = true) {
   userHistoryTitle.textContent = "User history";
   userHistoryPanel.dataset.userId = userId;
   userHistoryCache.clear();
-  userHistoryImages.clear();
+  userHistoryFiles.clear();
   userHistoryPanel.hidden = false;
   if (scrollToPanel) userHistoryPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
@@ -199,11 +205,11 @@ async function loadUserPlanDetails(historyId, button) {
     const result = await api(`/api/admin/users/${activeUserId}/history/${historyId}`);
     const progress = result.progress && typeof result.progress === "object" ? result.progress : {};
     const material = typeof progress.material === "string" ? progress.material : "";
-    const images = userHistoryImages.get(Number(historyId)) || [];
+    const images = userHistoryFiles.get(Number(historyId)) || [];
     const detailsHtml = `
-      <section class="plan-images"><h4>Image uploaded for this plan</h4>${images.length
+      <section class="plan-images"><h4>Files attached to this plan</h4>${images.length
         ? renderHistoryImages(images)
-        : '<p class="empty">No retained image is linked to this plan. Images are only available if private storage was configured when uploaded and have not expired.</p>'}</section>
+        : '<p class="empty">No retained files are linked to this plan. Files are available here only if private storage was configured when uploaded and they have not expired.</p>'}</section>
       ${material ? `<h4>Study material</h4><pre>${escapeHtml(material)}</pre>` : ""}
       <h4>Saved progress</h4><pre>${escapeHtml(JSON.stringify(progress, null, 2))}</pre>
       `;
@@ -296,7 +302,7 @@ document.querySelector("#close-user-history").addEventListener("click", () => {
   userHistoryPanel.hidden = true;
   userHistoryContent.innerHTML = "";
   userHistoryCache.clear();
-  userHistoryImages.clear();
+  userHistoryFiles.clear();
   selectedUserId = null;
 });
 

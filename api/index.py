@@ -75,6 +75,9 @@ class handler(StudyBuddyHandler):
             "/api/admin/logout",
             "/api/progress",
             "/api/images",
+            "/api/uploads/sign",
+            "/api/uploads/complete",
+            "/api/uploads/abort",
             "/api/extract-image",
             "/api/generate-lesson",
             "/api/generate-quiz",
@@ -87,7 +90,7 @@ class handler(StudyBuddyHandler):
     def do_DELETE(self):
         self.restore_api_path()
         path = urlsplit(self.path).path
-        if path.startswith(("/api/admin/images/", "/api/admin/users/")):
+        if path.startswith(("/api/admin/images/", "/api/admin/users/", "/api/uploads/")):
             if not try_initialize_database(self):
                 return
         super().do_DELETE()

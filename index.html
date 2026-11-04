@@ -103,6 +103,8 @@
             <span class="save-status" id="save-status" role="status" aria-live="polite" hidden></span>
             <button class="save-retry-button" id="save-retry" type="button" hidden>Retry save</button>
             <button class="icon-button" id="help-button" aria-label="How StudyBuddy works" title="How StudyBuddy works">?</button>
+            <button class="contact-us-button" id="contact-us" type="button" aria-expanded="false" aria-controls="contact-email">Contact Us</button>
+            <a class="contact-email" id="contact-email" href="mailto:mca111725039126@gmail.com" hidden>mca111725039126@gmail.com</a>
             <button class="sign-out-button" id="sign-out" type="button">Log out</button>
           </div>
         </header>
@@ -128,16 +130,18 @@
               </div>
 
               <form id="study-form">
-                <label class="field-label" for="material-text">Choose one source <span class="optional-label">upload an image or paste/upload text</span></label>
+                <label class="field-label" for="material-text">Choose your study sources <span class="optional-label">up to 10 files, plus notes</span></label>
                 <label class="upload-zone" for="file-input" id="upload-zone">
                   <span class="upload-icon" id="upload-icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5" /><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5" /></svg>
                   </span>
-                  <img class="image-preview" id="image-preview" alt="Preview of the selected study image" hidden />
-                  <span class="upload-text"><strong id="file-label">Upload one file, <span>browse</span>, or paste an image</strong><small id="file-status" aria-live="polite">Choose an image or text file · up to 10 MB</small></span>
-                  <input id="file-input" type="file" accept=".txt,.md,.markdown,.csv,.json,.html,.htm,text/plain,text/markdown,text/csv,application/json,text/html,image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp,image/heic,image/heif,image/tiff" />
+                  <img class="image-preview" id="image-preview" alt="Preview of a selected study image" hidden />
+                  <span class="upload-text"><strong id="file-label">Add files, <span>browse</span>, or paste an image</strong><small id="file-status" aria-live="polite">Images, PDF, DOCX, PPTX, and text · up to 10 MB each</small></span>
+                  <input id="file-input" type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.html,.htm,.pdf,.docx,.pptx,text/plain,text/markdown,text/csv,application/json,text/html,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp,image/heic,image/heif,image/tiff" />
                 </label>
-                <p class="image-retention-note">Images you use in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored images.</p>
+                <ul id="selected-files" class="selected-files" aria-live="polite" hidden></ul>
+                <button id="clear-files" class="clear-files-button" type="button" hidden>Clear selected files</button>
+                <p id="image-retention-note" class="image-retention-note">Files used in a study plan are stored privately for 30 days and are available in your Study history. Admins can manage stored files. Convert older .DOC/.PPT files to PDF or modern Office format first.</p>
                 <div class="or-divider"><span>OR PASTE YOUR TEXT</span></div>
                 <textarea id="material-text" rows="5" placeholder="Enter an education-related topic or question, or paste notes (for example: operating systems, photosynthesis, or algebra)." aria-describedby="material-hint"></textarea>
                 <div class="input-footer"><span id="material-hint" aria-live="polite">Checking the AI tutor…</span><span id="word-count">0 words</span></div>
