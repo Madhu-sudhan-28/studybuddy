@@ -24,6 +24,8 @@ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
 })[char]);
 const dateText = (timestamp) => new Date(Number(timestamp) * 1000).toLocaleString();
 const sizeText = (bytes) => `${(Number(bytes) / 1024 / 1024).toFixed(2)} MB`;
+const isImageFile = (file) => file.isImage === true ||
+  (file.isImage !== false && String(file.content_type || file.contentType || "").startsWith("image/"));
 
 function showState(isAdmin) {
   loading.hidden = true;
@@ -51,15 +53,16 @@ async function loadAdminData() {
   document.querySelector("#stat-active-users").textContent = stats.active_users;
   document.querySelector("#stat-disabled-users").textContent = stats.disabled_users;
   document.querySelector("#stat-plans").textContent = stats.study_plans;
-  document.querySelector("#stat-images").textContent = stats.files;
+  document.querySelector("#stat-images").textContent = stats.files ?? stats.images ?? 0;
   renderImages(imagesResult.images);
   renderUsers(usersResult.users);
 }
 
 function renderImages(images) {
+  images = Array.isArray(images) ? images : [];
   imagesContainer.innerHTML = images.length ? images.map((image) => `
     <article class="image-card">
-      ${image.isImage
+      ${isImageFile(image)
         ? `<img src="${escapeHtml(image.previewUrl)}" alt="Uploaded study image" loading="lazy" />`
         : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
@@ -86,12 +89,13 @@ function renderImages(images) {
 }
 
 function renderUsers(users) {
+  users = Array.isArray(users) ? users : [];
   usersContainer.innerHTML = users.length ? users.map((user) => `
     <tr>
       <td><button class="user-history-link" type="button" data-user-history="${Number(user.id)}">${escapeHtml(user.email)}</button></td>
       <td>${escapeHtml(user.auth_provider)}</td>
       <td>${dateText(user.created_at)}</td>
-      <td>${Number(user.file_count)}</td>
+      <td>${Number(user.file_count ?? user.image_count ?? user.fileCount ?? 0)}</td>
       <td>${user.is_disabled ? "Disabled" : "Active"}</td>
       <td class="actions">
         <button class="button secondary" type="button" data-user-action="${user.is_disabled ? "enable" : "disable"}" data-user-id="${Number(user.id)}">${user.is_disabled ? "Enable" : "Disable"}</button>
@@ -119,9 +123,10 @@ function renderUsers(users) {
 }
 
 function renderHistoryImages(images) {
+  images = Array.isArray(images) ? images : [];
   return images.length ? `<div class="image-grid">${images.map((image) => `
     <article class="image-card">
-      ${image.isImage
+      ${isImageFile(image)
         ? `<img src="${escapeHtml(image.previewUrl)}" alt="Image uploaded by this user" loading="lazy" />`
         : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
@@ -133,27 +138,37 @@ function renderHistoryImages(images) {
 }
 
 function renderUserHistory(result) {
+  const history = Array.isArray(result.history) ? result.history : [];
+  const unlinkedFiles = Array.isArray(result.unlinkedFiles)
+    ? result.unlinkedFiles
+    : Array.isArray(result.unlinkedImages) ? result.unlinkedImages : [];
   userHistoryTitle.textContent = `History for ${result.user.email}`;
-  const histories = result.history.length ? result.history.map((item) => `
+  const histories = history.length ? history.map((item) => {
+    const images = Array.isArray(item.images) ? item.images : Array.isArray(item.files) ? item.files : [];
+    return `
     <article class="history-record">
       <div class="history-record-heading">
         <div><h3>${escapeHtml(item.title)}</h3><small>${dateText(item.createdAt)}</small></div>
         <div class="history-record-actions">
           <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
-          ${item.images.some((file) => file.isImage)
-            ? `<a class="plan-image-thumbnail" href="${escapeHtml(item.images.find((file) => file.isImage).previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(item.images.find((file) => file.isImage).previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
-            : item.images.length
-              ? `<span class="plan-image-file" aria-label="Plan has uploaded files">${item.images.length} file${item.images.length === 1 ? "" : "s"}</span>`
+          ${images.some(isImageFile)
+            ? `<a class="plan-image-thumbnail" href="${escapeHtml(images.find(isImageFile).previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(images.find(isImageFile).previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
+            : images.length
+              ? `<span class="plan-image-file" aria-label="Plan has uploaded files">${images.length} file${images.length === 1 ? "" : "s"}</span>`
               : '<span class="plan-image-missing">No saved files</span>'}
         </div>
       </div>
       <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
-    </article>`).join("") : '<p class="empty">No saved study history.</p>';
+    </article>`;
+  }).join("") : '<p class="empty">No saved study history.</p>';
   userHistoryFiles.clear();
-  result.history.forEach((item) => userHistoryFiles.set(Number(item.id), item.images));
-  const unlinkedImages = result.unlinkedFiles.length ? `
+  history.forEach((item) => userHistoryFiles.set(
+    Number(item.id),
+    Array.isArray(item.images) ? item.images : Array.isArray(item.files) ? item.files : [],
+  ));
+  const unlinkedImages = unlinkedFiles.length ? `
     <section class="history-uploads">
-      <h3>Other retained files</h3>${renderHistoryImages(result.unlinkedFiles)}
+      <h3>Other retained files</h3>${renderHistoryImages(unlinkedFiles)}
     </section>` : "";
   userHistoryContent.innerHTML = `${histories}${unlinkedImages}`;
   userHistoryContent.querySelectorAll("[data-view-plan]").forEach((button) => {
