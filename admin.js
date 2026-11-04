@@ -191,9 +191,12 @@ async function loadUserPlanDetails(historyId, button) {
     const material = typeof progress.material === "string" ? progress.material : "";
     const images = userHistoryImages.get(Number(historyId)) || [];
     const detailsHtml = `
+      <section class="plan-images"><h4>Image uploaded for this plan</h4>${images.length
+        ? renderHistoryImages(images)
+        : '<p class="empty">No retained image is linked to this plan. Images are only available if private storage was configured when uploaded and have not expired.</p>'}</section>
       ${material ? `<h4>Study material</h4><pre>${escapeHtml(material)}</pre>` : ""}
       <h4>Saved progress</h4><pre>${escapeHtml(JSON.stringify(progress, null, 2))}</pre>
-      <section class="plan-images"><h4>Images uploaded with this plan</h4>${renderHistoryImages(images)}</section>`;
+      `;
     userHistoryCache.set(historyId, detailsHtml);
     details.innerHTML = detailsHtml;
     details.hidden = false;

@@ -2408,6 +2408,7 @@ form.addEventListener("submit", async (event) => {
     : imageMaterialReady ? "image-text" : "text";
   let imageId = null;
   let imageSaveWarning = false;
+  if (preparedStudyImage) await refreshVisionStatus();
   if (preparedStudyImage && imageStorageAvailable) {
     submitButton.disabled = true;
     fileStatus.textContent = "Saving your image privately for 30 days…";

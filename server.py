@@ -789,11 +789,13 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 for image in image_rows
             ]
             images_by_plan = {}
+            images_by_id = {image["id"]: image for image in images}
             for image in images:
                 if image["plan_id"]:
                     images_by_plan.setdefault(image["plan_id"], []).append(image)
             histories = []
             history_plan_ids = set()
+            associated_image_ids = set()
             for row in history_rows:
                 try:
                     progress = json.loads(row["progress_json"])
@@ -810,15 +812,25 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 )
                 plan_id = row["plan_id"]
                 history_plan_ids.add(plan_id)
+                plan_images = list(images_by_plan.get(plan_id, []))
+                progress_image_id = progress.get("imageId")
+                if isinstance(progress_image_id, int) and not isinstance(progress_image_id, bool):
+                    progress_image = images_by_id.get(progress_image_id)
+                    if progress_image and all(
+                        image["id"] != progress_image_id for image in plan_images
+                    ):
+                        plan_images.append(progress_image)
+                associated_image_ids.update(image["id"] for image in plan_images)
                 histories.append({
                     "id": row["id"],
                     "planId": plan_id,
                     "title": title[:100],
                     "createdAt": row["created_at"],
-                    "images": images_by_plan.get(plan_id, []),
+                    "images": plan_images,
                 })
             unlinked_images = [
-                image for image in images if image["plan_id"] not in history_plan_ids
+                image for image in images
+                if image["id"] not in associated_image_ids and image["plan_id"] not in history_plan_ids
             ]
             send_json(
                 self,
