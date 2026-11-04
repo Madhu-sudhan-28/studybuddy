@@ -78,6 +78,9 @@ ADMIN_LOGIN_WINDOW_SECONDS = 15 * 60
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
 MAX_PROGRESS_BYTES = 8 * 1024 * 1024
 PASSWORD_ITERATIONS = 310_000
+IMAGE_BUCKET_CHECK_SECONDS = 300
+_image_bucket_checked_at = 0
+_image_bucket_lock = threading.Lock()
 
 
 @contextmanager
@@ -366,38 +369,43 @@ def supabase_storage_request(method, path, body=None, content_type=None, allow_s
 
 
 def ensure_image_bucket():
-    _, _, bucket = supabase_storage_settings()
-    bucket_path = f"bucket/{urllib.parse.quote(bucket, safe='')}"
-    status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
-    if status == 404:
-        status, _ = supabase_storage_request(
-            "POST",
-            "bucket",
-            json.dumps({
-                "id": bucket,
-                "name": bucket,
-                "public": False,
-                "file_size_limit": MAX_IMAGE_BYTES,
-                "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
-            }).encode("utf-8"),
-            "application/json",
-            allow_statuses=(400, 409),
-        )
-        if status in {400, 409}:
-            status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
-        if status not in {200, 201}:
-            raise SupabaseStorageError("Private image storage bucket could not be created.")
-    else:
-        supabase_storage_request(
-            "PUT",
-            bucket_path,
-            json.dumps({
-                "public": False,
-                "file_size_limit": MAX_IMAGE_BYTES,
-                "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
-            }).encode("utf-8"),
-            "application/json",
-        )
+    global _image_bucket_checked_at
+    with _image_bucket_lock:
+        if time.monotonic() - _image_bucket_checked_at < IMAGE_BUCKET_CHECK_SECONDS:
+            return
+        _, _, bucket = supabase_storage_settings()
+        bucket_path = f"bucket/{urllib.parse.quote(bucket, safe='')}"
+        status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
+        if status == 404:
+            status, _ = supabase_storage_request(
+                "POST",
+                "bucket",
+                json.dumps({
+                    "id": bucket,
+                    "name": bucket,
+                    "public": False,
+                    "file_size_limit": MAX_IMAGE_BYTES,
+                    "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
+                }).encode("utf-8"),
+                "application/json",
+                allow_statuses=(400, 409),
+            )
+            if status in {400, 409}:
+                status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
+            if status not in {200, 201}:
+                raise SupabaseStorageError("Private image storage bucket could not be created.")
+        else:
+            supabase_storage_request(
+                "PUT",
+                bucket_path,
+                json.dumps({
+                    "public": False,
+                    "file_size_limit": MAX_IMAGE_BYTES,
+                    "allowed_mime_types": sorted(SUPPORTED_UPLOAD_TYPES),
+                }).encode("utf-8"),
+                "application/json",
+            )
+        _image_bucket_checked_at = time.monotonic()
 
 
 def extract_document_text(file_bytes, file_name):
@@ -1135,54 +1143,59 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "SELECT id, progress_json, created_at FROM study_history WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 50",
                     (user["id"],),
                 ).fetchall()
-                items = []
-                for row in rows:
-                    try:
-                        progress = json.loads(row["progress_json"])
-                    except json.JSONDecodeError:
+                file_rows = connection.execute(
+                    "SELECT id, plan_id, file_name, content_type, file_size, uploaded_at, expires_at "
+                    "FROM uploaded_images WHERE user_id = ? AND expires_at > ? "
+                    "ORDER BY uploaded_at DESC, id DESC",
+                    (user["id"], now),
+                ).fetchall()
+            files_by_plan = {}
+            files_by_id = {}
+            for file_record in file_rows:
+                file_metadata = image_metadata(file_record)
+                files_by_id[file_record["id"]] = file_metadata
+                if file_record["plan_id"]:
+                    files_by_plan.setdefault(file_record["plan_id"], []).append(file_metadata)
+            items = []
+            for row in rows:
+                try:
+                    progress = json.loads(row["progress_json"])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(progress, dict):
+                    continue
+                topics = progress.get("topics") if isinstance(progress.get("topics"), list) else []
+                first_title = topics[0].get("title") if topics and isinstance(topics[0], dict) else ""
+                material = progress.get("material") if isinstance(progress.get("material"), str) else ""
+                title = first_title or next((line.strip() for line in material.splitlines() if line.strip()), "Study plan")
+                plan_id = progress.get("planId")
+                attachments = list(files_by_plan.get(plan_id, [])) if isinstance(plan_id, str) else []
+                stored_file_ids = {file_record["id"] for file_record in attachments}
+                progress_file_ids = progress.get("imageIds")
+                if not isinstance(progress_file_ids, list):
+                    progress_file_ids = [progress.get("imageId")]
+                for file_id in progress_file_ids:
+                    if (
+                        not isinstance(file_id, int)
+                        or isinstance(file_id, bool)
+                        or file_id in stored_file_ids
+                    ):
                         continue
-                    topics = progress.get("topics") if isinstance(progress.get("topics"), list) else []
-                    first_title = topics[0].get("title") if topics and isinstance(topics[0], dict) else ""
-                    material = progress.get("material") if isinstance(progress.get("material"), str) else ""
-                    title = first_title or next((line.strip() for line in material.splitlines() if line.strip()), "Study plan")
-                    plan_id = progress.get("planId")
-                    files = connection.execute(
-                        "SELECT id, file_name, content_type, file_size, uploaded_at, expires_at "
-                        "FROM uploaded_images WHERE user_id = ? AND plan_id = ? AND expires_at > ? "
-                        "ORDER BY uploaded_at DESC, id DESC",
-                        (user["id"], plan_id, now),
-                    ).fetchall() if isinstance(plan_id, str) else []
-                    attachments = [image_metadata(file_record) for file_record in files]
-                    stored_file_ids = {file_record["id"] for file_record in attachments}
-                    progress_file_ids = progress.get("imageIds")
-                    if not isinstance(progress_file_ids, list):
-                        progress_file_ids = [progress.get("imageId")]
-                    for file_id in progress_file_ids:
-                        if (
-                            not isinstance(file_id, int)
-                            or isinstance(file_id, bool)
-                            or file_id in stored_file_ids
-                        ):
-                            continue
-                        file_record = connection.execute(
-                            "SELECT id, file_name, content_type, file_size, uploaded_at, expires_at "
-                            "FROM uploaded_images WHERE id = ? AND user_id = ? AND expires_at > ?",
-                            (file_id, user["id"], now),
-                        ).fetchone()
-                        if file_record:
-                            attachments.append(image_metadata(file_record))
-                            stored_file_ids.add(file_id)
-                    first_image = next(
-                        (file_record for file_record in attachments if file_record["isImage"]),
-                        None,
-                    )
-                    items.append({
-                        "id": row["id"],
-                        "title": title[:100],
-                        "createdAt": row["created_at"],
-                        "files": attachments,
-                        "image": first_image,
-                    })
+                    file_record = files_by_id.get(file_id)
+                    if file_record:
+                        attachments.append(file_record)
+                        stored_file_ids.add(file_id)
+                first_image = next(
+                    (file_record for file_record in attachments if file_record["isImage"]),
+                    None,
+                )
+                items.append({
+                    "id": row["id"],
+                    "title": title[:100],
+                    "createdAt": row["created_at"],
+                    "files": attachments,
+                    "image": first_image,
+                })
             send_json(self, 200, {"items": items})
             return
         history_match = re.fullmatch(r"/api/history/(\d+)", request_path)

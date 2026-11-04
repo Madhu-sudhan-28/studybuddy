@@ -136,7 +136,7 @@ async function refreshVisionStatus() {
       : "Guided lessons and quizzes are currently unavailable. Images can still be read with basic text recognition.";
     const storageError = typeof status.imageStorageError === "string" ? status.imageStorageError : "";
     document.querySelector("#image-retention-note").textContent = imageStorageAvailable
-      ? "Files used in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored files."
+      ? "Files used in a study plan are stored privately for 30 days. You can view and download them from Study history."
       : `Private file storage is unavailable${storageError ? `: ${storageError}` : ". You can still study, but uploaded files will not be saved for later download."}`;
     return visionAvailable;
   } catch (error) {
@@ -2319,7 +2319,7 @@ async function compressImageForAnalysis(file) {
 }
 
 async function extractImageMaterial(file) {
-  await refreshVisionStatus();
+  await visionStatusReady;
   if (!visionAvailable) {
     return {
       extractedText: cleanExtractedStudyText(await readImageText(file, () => {})),
@@ -2383,6 +2383,8 @@ fileInput.addEventListener("change", async () => {
   const files = [...(fileInput.files || [])];
   fileInput.value = "";
   if (!files.length) return;
+  materialInput.value = "";
+  updateWordCount();
   if (filesProcessing) {
     formError.textContent = "Wait for the current files to finish uploading and processing.";
     return;
