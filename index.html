@@ -30,11 +30,11 @@
           <span class="google-mark" aria-hidden="true">G</span>
           <span>Continue with Google</span>
         </a>
-        <div class="auth-divider"><span>OR CONTINUE WITH EMAIL</span></div>
+        <div class="auth-divider" id="auth-divider"><span>OR CONTINUE WITH EMAIL</span></div>
         <label class="field-label" for="auth-email">Email</label>
         <input class="auth-input" id="auth-email" type="email" autocomplete="email" maxlength="254" required />
-        <label class="field-label" for="auth-password">Password</label>
-        <div class="auth-password-field">
+        <label class="field-label" id="auth-password-label" for="auth-password">Password</label>
+        <div class="auth-password-field" id="auth-password-wrap">
           <input class="auth-input" id="auth-password" type="password" autocomplete="current-password" minlength="8" maxlength="256" required />
           <button class="auth-password-toggle" type="button" data-password-toggle="auth-password" aria-label="Show password" aria-pressed="false" aria-controls="auth-password">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></svg>
@@ -42,8 +42,12 @@
           </button>
         </div>
         <p class="auth-password-hint" id="auth-password-hint" hidden>At least 8 characters, including an uppercase letter, a lowercase letter, a number, and a symbol.</p>
+        <div id="auth-code-field" hidden>
+          <label class="field-label" for="auth-code">Six-digit code</label>
+          <input class="auth-input" id="auth-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" />
+        </div>
         <div id="auth-confirm-password-field" hidden>
-          <label class="field-label" for="auth-confirm-password">Confirm password</label>
+          <label class="field-label" id="auth-confirm-password-label" for="auth-confirm-password">Confirm password</label>
           <div class="auth-password-field">
             <input class="auth-input" id="auth-confirm-password" type="password" autocomplete="new-password" minlength="8" maxlength="256" />
             <button class="auth-password-toggle" type="button" data-password-toggle="auth-confirm-password" aria-label="Show password" aria-pressed="false" aria-controls="auth-confirm-password">
@@ -54,7 +58,10 @@
         </div>
         <p class="auth-error" id="auth-error" role="alert"></p>
         <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
-        <p class="auth-switch"><span id="auth-switch-prompt">New to StudyBuddy?</span> <button type="button" id="auth-toggle">Create an account</button></p>
+        <button class="auth-link" id="auth-forgot-password" type="button">Forgot password?</button>
+        <button class="auth-link" id="auth-resend-code" type="button" hidden>Resend code</button>
+        <button class="auth-link" id="auth-back-to-login" type="button" hidden>Back to sign in</button>
+        <p class="auth-switch" id="auth-switch"><span id="auth-switch-prompt">New to StudyBuddy?</span> <button type="button" id="auth-toggle">Create an account</button></p>
       </form>
       <p class="auth-footnote">Your study material and progress are saved to your account.</p>
     </section>

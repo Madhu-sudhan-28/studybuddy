@@ -52,6 +52,7 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .auth-card h1 { margin-bottom: 9px; }
 .auth-copy { margin-bottom: 18px; color: #7f8d84; font-size: 15px; line-height: 1.6; }
 .google-sign-in { width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: center; gap: 11px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fff; color: #34463a; font-size: 14px; font-weight: 600; transition: background .18s ease, border-color .18s ease; }
+.google-sign-in[hidden], .auth-divider[hidden] { display: none; }
 .google-sign-in:hover { border-color: #b7c9b0; background: #f8faf6; }
 .google-sign-in:focus-visible { outline: 3px solid #94b9a1; outline-offset: 3px; }
 .google-mark { font: 700 19px Arial, sans-serif; color: #4285f4; }
@@ -70,6 +71,9 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .auth-error { min-height: 18px; margin: 0 0 8px; color: #a33d32; font-size: 12.5px; }
 .auth-error.auth-success { color: #3b704b; }
 .auth-submit { width: 100%; justify-content: center; }
+.auth-link { display: block; margin: 12px auto 0; padding: 0; border: 0; background: transparent; color: #285b43; font-size: 12.5px; font-weight: 700; }
+.auth-link:hover { text-decoration: underline; }
+.auth-link[hidden] { display: none; }
 .auth-switch { margin: 18px 0 0; text-align: center; color: #7f8d84; font-size: 12.5px; }
 .auth-switch button { padding: 0; border: 0; background: transparent; color: #285b43; font-weight: 700; }
 .auth-footnote { margin: 0; color: #929b92; font-size: 12.5px; text-align: center; }

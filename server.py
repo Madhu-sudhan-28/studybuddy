@@ -67,6 +67,8 @@ CRON_SECRET_NAME = "CRON_SECRET"
 GOOGLE_CLIENT_ID_NAME = "GOOGLE_CLIENT_ID"
 GOOGLE_CLIENT_SECRET_NAME = "GOOGLE_CLIENT_SECRET"
 GOOGLE_REDIRECT_URI_NAME = "GOOGLE_REDIRECT_URI"
+RESEND_API_KEY_NAME = "RESEND_API_KEY"
+RESEND_FROM_EMAIL_NAME = "RESEND_FROM_EMAIL"
 AUTH_COOKIE = "studybuddy_session"
 ADMIN_COOKIE = "studybuddy_admin"
 GOOGLE_OAUTH_COOKIE = "studybuddy_google_oauth"
@@ -78,6 +80,9 @@ ADMIN_LOGIN_WINDOW_SECONDS = 15 * 60
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
 MAX_PROGRESS_BYTES = 8 * 1024 * 1024
 PASSWORD_ITERATIONS = 310_000
+EMAIL_CODE_TTL_SECONDS = 15 * 60
+EMAIL_CODE_RESEND_SECONDS = 60
+EMAIL_CODE_MAX_ATTEMPTS = 5
 IMAGE_BUCKET_CHECK_SECONDS = 300
 _image_bucket_checked_at = 0
 _image_bucket_lock = threading.Lock()
@@ -167,6 +172,15 @@ def initialize_database():
                 expires_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS login_sessions_user_id ON login_sessions(user_id);
+            CREATE TABLE IF NOT EXISTS auth_email_codes (
+                email TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sent_at INTEGER NOT NULL,
+                PRIMARY KEY(email, purpose)
+            );
             CREATE TABLE IF NOT EXISTS study_progress (
                 user_id {user_id_type} PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                 progress_json TEXT NOT NULL,
@@ -207,6 +221,9 @@ def initialize_database():
         connection.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT FALSE"
         )
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE"
+        )
         updated_at_column = connection.execute(
             "SELECT data_type FROM information_schema.columns "
             "WHERE table_schema = current_schema() AND table_name = 'study_progress' AND column_name = 'updated_at'"
@@ -227,6 +244,146 @@ def verify_password(password, stored):
         return hmac.compare_digest(hash_password(password, bytes.fromhex(salt_hex)), stored)
     except (ValueError, TypeError):
         return False
+
+
+class EmailDeliveryError(RuntimeError):
+    pass
+
+
+class EmailCodeRateLimitError(RuntimeError):
+    pass
+
+
+def resend_email_settings():
+    api_key = os.environ.get(RESEND_API_KEY_NAME, "").strip()
+    from_email = os.environ.get(RESEND_FROM_EMAIL_NAME, "").strip()
+    if not api_key or not from_email:
+        raise EmailDeliveryError(
+            "Email verification is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL in the server environment."
+        )
+    return api_key, from_email
+
+
+def email_code_digest(email, purpose, code, api_key):
+    payload = f"{email}:{purpose}:{code}".encode("utf-8")
+    return hmac.new(api_key.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def send_auth_email_code(email, purpose):
+    api_key, from_email = resend_email_settings()
+    now = int(time.time())
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    code_hash = email_code_digest(email, purpose, code, api_key)
+    with database_connection() as connection:
+        connection.execute("DELETE FROM auth_email_codes WHERE expires_at <= ?", (now,))
+        issued = connection.execute(
+            "INSERT INTO auth_email_codes(email, purpose, code_hash, expires_at, attempts, last_sent_at) "
+            "VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(email, purpose) DO UPDATE SET "
+            "code_hash=excluded.code_hash, expires_at=excluded.expires_at, attempts=0, last_sent_at=excluded.last_sent_at "
+            "WHERE auth_email_codes.last_sent_at <= ? RETURNING email",
+            (
+                email,
+                purpose,
+                code_hash,
+                now + EMAIL_CODE_TTL_SECONDS,
+                now,
+                now - EMAIL_CODE_RESEND_SECONDS,
+            ),
+        ).fetchone()
+    if not issued:
+        raise EmailCodeRateLimitError("Please wait a minute before requesting another code.")
+    if purpose == "verify":
+        subject = "Verify your StudyBuddy account"
+        purpose_text = "verify your email address and finish creating your StudyBuddy account"
+    else:
+        subject = "Reset your StudyBuddy password"
+        purpose_text = "reset your StudyBuddy password"
+    text = (
+        f"Your StudyBuddy code is {code}. Use it to {purpose_text}. "
+        "It expires in 15 minutes. If you did not request this, you can ignore this email."
+    )
+    payload = json.dumps({
+        "from": from_email,
+        "to": [email],
+        "subject": subject,
+        "text": text,
+        "html": (
+            "<div style=\"font-family:Arial,sans-serif;color:#293d33\">"
+            f"<h2>{subject}</h2><p>Use this code to {purpose_text}:</p>"
+            f"<p style=\"font-size:30px;font-weight:bold;letter-spacing:6px\">{code}</p>"
+            "<p>This code expires in 15 minutes. If you did not request it, ignore this email.</p>"
+            "</div>"
+        ),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.status not in {200, 201}:
+                raise EmailDeliveryError("The email provider could not send your code. Please try again.")
+    except urllib.error.HTTPError as error:
+        with database_connection() as connection:
+            connection.execute(
+                "DELETE FROM auth_email_codes WHERE email = ? AND purpose = ? AND code_hash = ?",
+                (email, purpose, code_hash),
+            )
+        print(f"Resend rejected an authentication email (HTTP {error.code}).", file=sys.stderr)
+        raise EmailDeliveryError("The email provider could not send your code. Please try again.") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        with database_connection() as connection:
+            connection.execute(
+                "DELETE FROM auth_email_codes WHERE email = ? AND purpose = ? AND code_hash = ?",
+                (email, purpose, code_hash),
+            )
+        print("Resend could not be reached to send an authentication email.", file=sys.stderr)
+        raise EmailDeliveryError("The email provider could not be reached. Please try again.") from error
+
+
+def consume_email_code(connection, email, purpose, code, api_key):
+    if not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
+        return False
+    now = int(time.time())
+    supplied_hash = email_code_digest(email, purpose, code, api_key)
+    challenge = connection.execute(
+        "SELECT code_hash, expires_at, attempts FROM auth_email_codes WHERE email = ? AND purpose = ?",
+        (email, purpose),
+    ).fetchone()
+    if not challenge or challenge["expires_at"] <= now or challenge["attempts"] >= EMAIL_CODE_MAX_ATTEMPTS:
+        return False
+    if not hmac.compare_digest(challenge["code_hash"], supplied_hash):
+        connection.execute(
+            "UPDATE auth_email_codes SET attempts = attempts + 1 "
+            "WHERE email = ? AND purpose = ? AND expires_at > ? AND attempts < ?",
+            (email, purpose, now, EMAIL_CODE_MAX_ATTEMPTS),
+        )
+        return False
+    consumed = connection.execute(
+        "DELETE FROM auth_email_codes WHERE email = ? AND purpose = ? AND code_hash = ? "
+        "AND expires_at > ? AND attempts < ? RETURNING email",
+        (email, purpose, supplied_hash, now, EMAIL_CODE_MAX_ATTEMPTS),
+    ).fetchone()
+    return consumed is not None
+
+
+def validate_account_password(password):
+    if not isinstance(password, str) or len(password) < 8 or len(password) > 256:
+        raise ValueError("Use a password between 8 and 256 characters.")
+    if (
+        not re.search(r"[A-Z]", password)
+        or not re.search(r"[a-z]", password)
+        or not re.search(r"[0-9]", password)
+        or not re.search(r"[^A-Za-z0-9\s]", password)
+    ):
+        raise ValueError(
+            "Include an uppercase letter, a lowercase letter, a number, and a symbol in your password."
+        )
 
 
 def session_token_from(handler):
@@ -1826,7 +1983,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 raise ValueError("Enter your email and password.")
             with database_connection() as connection:
                 user = connection.execute(
-                    "SELECT id, email, password_hash, is_disabled FROM users WHERE email = ?", (email,)
+                    "SELECT id, email, password_hash, is_disabled, email_verified FROM users WHERE email = ?", (email,)
                 ).fetchone()
                 if not user:
                     send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
@@ -1836,6 +1993,9 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     return
                 if not verify_password(password, user["password_hash"]):
                     send_json(self, 401, {"error": "Incorrect password. Please enter the correct password and try again."})
+                    return
+                if not user["email_verified"]:
+                    send_json(self, 403, {"error": "Verify your email address before signing in.", "verificationRequired": True})
                     return
                 now = int(time.time())
                 token = secrets.token_urlsafe(32)
@@ -1861,38 +2021,197 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             password = payload.get("password", "")
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter a valid email address.")
-            if not isinstance(password, str) or len(password) < 8 or len(password) > 256:
-                raise ValueError("Use a password between 8 and 256 characters.")
-            if (
-                not re.search(r"[A-Z]", password)
-                or not re.search(r"[a-z]", password)
-                or not re.search(r"[0-9]", password)
-                or not re.search(r"[^A-Za-z0-9\s]", password)
-            ):
-                raise ValueError(
-                    "Include an uppercase letter, a lowercase letter, a number, and a symbol in your password."
-                )
+            validate_account_password(password)
+            resend_email_settings()
             now = int(time.time())
-            token = secrets.token_urlsafe(32)
             with database_connection() as connection:
                 cursor = connection.execute(
-                    "INSERT INTO users(email, password_hash, created_at, auth_provider) "
-                    "VALUES (?, ?, ?, 'password') RETURNING id",
+                    "INSERT INTO users(email, password_hash, created_at, auth_provider, email_verified) "
+                    "VALUES (?, ?, ?, 'password', FALSE) RETURNING id",
                     (email, hash_password(password), now),
                 )
-                user_id = cursor.fetchone()["id"]
-                connection.execute(
-                    "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-                    (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
-                )
-            send_json(self, 201, {"user": {"email": email}}, {"Set-Cookie": self.session_cookie_value(token)})
+                cursor.fetchone()
+            try:
+                send_auth_email_code(email, "verify")
+            except (EmailDeliveryError, EmailCodeRateLimitError) as error:
+                status = 429 if isinstance(error, EmailCodeRateLimitError) else 503
+                send_json(self, status, {"error": str(error), "verificationRequired": True})
+                return
+            send_json(self, 202, {
+                "verificationRequired": True,
+                "message": "We sent a six-digit verification code to your email address.",
+            })
         except Exception as error:
             if is_duplicate_email_error(error):
                 send_json(self, 409, {"error": "An account with that email already exists. Sign in instead."})
             elif isinstance(error, ValueError):
                 send_json(self, 400, {"error": str(error)})
+            elif isinstance(error, EmailDeliveryError):
+                send_json(self, 503, {"error": str(error)})
             elif is_database_connection_error(error):
                 print("Account registration could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def verify_email_account(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            code = payload.get("code", "")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter the email address used to create your account.")
+            api_key, _ = resend_email_settings()
+            now = int(time.time())
+            token = secrets.token_urlsafe(32)
+            verified = False
+            with database_connection() as connection:
+                user = connection.execute(
+                    "SELECT id, email, email_verified, is_disabled FROM users "
+                    "WHERE email = ? AND auth_provider = 'password'",
+                    (email,),
+                ).fetchone()
+                if user and not user["is_disabled"] and not user["email_verified"]:
+                    verified = consume_email_code(connection, email, "verify", code, api_key)
+                    if verified:
+                        connection.execute("UPDATE users SET email_verified = TRUE WHERE id = ?", (user["id"],))
+                        connection.execute(
+                            "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+                            (hashlib.sha256(token.encode()).hexdigest(), user["id"], now + SESSION_TTL_SECONDS),
+                        )
+            if not verified:
+                send_json(self, 400, {"error": "This verification code is invalid or expired. Request a new code and try again."})
+                return
+            send_json(
+                self,
+                200,
+                {"user": {"email": email}},
+                {"Set-Cookie": self.session_cookie_value(token)},
+            )
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except EmailDeliveryError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Email verification could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def resend_verification_code(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter a valid email address.")
+            resend_email_settings()
+            with database_connection() as connection:
+                user = connection.execute(
+                    "SELECT email_verified, is_disabled FROM users "
+                    "WHERE email = ? AND auth_provider = 'password'",
+                    (email,),
+                ).fetchone()
+            if user and not user["email_verified"] and not user["is_disabled"]:
+                try:
+                    send_auth_email_code(email, "verify")
+                except EmailCodeRateLimitError:
+                    pass
+                except EmailDeliveryError:
+                    print("Verification email delivery failed.", file=sys.stderr)
+            send_json(self, 200, {
+                "ok": True,
+                "message": "If that account needs verification, a code will be sent.",
+            })
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except EmailDeliveryError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Verification code request could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def request_password_reset(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter a valid email address.")
+            resend_email_settings()
+            with database_connection() as connection:
+                user = connection.execute(
+                    "SELECT email_verified, is_disabled FROM users "
+                    "WHERE email = ? AND auth_provider = 'password'",
+                    (email,),
+                ).fetchone()
+            if user and user["email_verified"] and not user["is_disabled"]:
+                try:
+                    send_auth_email_code(email, "reset")
+                except EmailCodeRateLimitError:
+                    pass
+                except EmailDeliveryError:
+                    print("Password reset email delivery failed.", file=sys.stderr)
+            send_json(self, 200, {
+                "ok": True,
+                "message": "If a verified email/password account exists, a reset code will be sent.",
+            })
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except EmailDeliveryError as error:
+            send_json(self, 503, {"error": "The password reset email could not be sent. Please try again shortly."})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Password reset request could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def reset_account_password(self):
+        try:
+            payload = self.read_json_body(4096)
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
+            code = payload.get("code", "")
+            password = payload.get("password", "")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                raise ValueError("Enter the email address used to request the reset code.")
+            validate_account_password(password)
+            api_key, _ = resend_email_settings()
+            reset = False
+            with database_connection() as connection:
+                user = connection.execute(
+                    "SELECT id, email_verified, is_disabled FROM users "
+                    "WHERE email = ? AND auth_provider = 'password'",
+                    (email,),
+                ).fetchone()
+                if user and user["email_verified"] and not user["is_disabled"]:
+                    reset = consume_email_code(connection, email, "reset", code, api_key)
+                    if reset:
+                        connection.execute(
+                            "UPDATE users SET password_hash = ? WHERE id = ?",
+                            (hash_password(password), user["id"]),
+                        )
+                        connection.execute("DELETE FROM login_sessions WHERE user_id = ?", (user["id"],))
+            if not reset:
+                send_json(self, 400, {"error": "This password reset code is invalid or expired. Request a new code and try again."})
+                return
+            send_json(self, 200, {
+                "ok": True,
+                "message": "Your password was reset. Sign in with your new password.",
+            })
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except EmailDeliveryError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Password reset could not connect to the database.", file=sys.stderr)
                 send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
             else:
                 raise
@@ -2090,7 +2409,14 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 self.upload_study_image()
             return
         if path in {
-            "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/progress",
+            "/api/auth/register",
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/auth/verify-email",
+            "/api/auth/resend-verification",
+            "/api/auth/forgot-password",
+            "/api/auth/reset-password",
+            "/api/progress",
         }:
             if not origin_is_same_site(self):
                 send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
@@ -2101,6 +2427,14 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 self.login_account()
             elif path == "/api/auth/logout":
                 self.logout_account()
+            elif path == "/api/auth/verify-email":
+                self.verify_email_account()
+            elif path == "/api/auth/resend-verification":
+                self.resend_verification_code()
+            elif path == "/api/auth/forgot-password":
+                self.request_password_reset()
+            elif path == "/api/auth/reset-password":
+                self.reset_account_password()
             else:
                 self.save_progress()
             return
