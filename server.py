@@ -307,10 +307,12 @@ def supabase_storage_settings():
 
 def image_storage_configured():
     try:
-        supabase_storage_settings()
-        return True
-    except RuntimeError:
-        return False
+        _, _, bucket = supabase_storage_settings()
+        bucket_path = f"bucket/{urllib.parse.quote(bucket, safe='')}"
+        supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
+        return True, None
+    except (RuntimeError, SupabaseStorageError) as error:
+        return False, str(error)
 
 
 class SupabaseStorageError(RuntimeError):
@@ -988,6 +990,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             return
         if request_path == "/api/status":
             configured = bool(get_api_key())
+            image_storage_available, image_storage_error = image_storage_configured()
             send_json(
                 self,
                 200,
@@ -996,7 +999,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "visionAvailable": configured,
                     "aiAvailable": configured,
                     "aiConfigured": configured,
-                    "imageStorageAvailable": image_storage_configured(),
+                    "imageStorageAvailable": image_storage_available,
+                    "imageStorageError": image_storage_error,
                 },
             )
             return

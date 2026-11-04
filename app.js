@@ -131,9 +131,10 @@ async function refreshVisionStatus() {
     materialHint.textContent = visionAvailable
       ? "The AI tutor is ready for education questions and study topics. Add notes when you want lessons grounded in your course material."
       : "Guided lessons and quizzes are currently unavailable. Images can still be read with basic text recognition.";
+    const storageError = typeof status.imageStorageError === "string" ? status.imageStorageError : "";
     document.querySelector("#image-retention-note").textContent = imageStorageAvailable
       ? "Images used in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored images."
-      : "Image history is not configured yet. You can still study from images, but they will not be saved for later download.";
+      : `Private image storage is unavailable${storageError ? `: ${storageError}` : ". You can still study from images, but they will not be saved for later download."}`;
     return visionAvailable;
   } catch (error) {
     console.error("Could not check image understanding status.", error);
