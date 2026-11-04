@@ -88,8 +88,12 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .icon-button { width: 25px; height: 25px; border: 1px solid #e1e5dc; border-radius: 50%; color: #79877d; background: #fffefa; font-size: 13.5px; font-weight: 600; }
 .contact-us-button { min-height: 34px; padding: 0 11px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; color: #40594a; font-size: 12.5px; font-weight: 600; }
 .contact-us-button:hover { border-color: #b9cbb9; background: #f0f4ee; }
-.contact-email { color: #40594a; font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
-.contact-email[hidden] { display: none; }
+.contact-details { display: flex; align-items: center; gap: 7px; }
+.contact-details[hidden] { display: none; }
+.contact-email { color: #40594a; font-size: 11.5px; white-space: nowrap; }
+.contact-copy-button { min-height: 28px; padding: 0 8px; border: 1px solid #dfe5dc; border-radius: 6px; background: #fffefa; color: #40594a; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.contact-copy-button:hover { border-color: #b9cbb9; background: #f0f4ee; }
+.contact-copy-status { color: #40594a; font-size: 11px; white-space: nowrap; }
 .sign-out-button { min-height: 34px; padding: 0 13px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; color: #40594a; font-size: 12.5px; font-weight: 600; transition: background .18s ease, border-color .18s ease; }
 .sign-out-button:hover { border-color: #b9cbb9; background: #f0f4ee; }
 

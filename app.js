@@ -2786,10 +2786,22 @@ document.querySelector("#sign-out").addEventListener("click", async () => {
 });
 document.querySelector("#contact-us").addEventListener("click", (event) => {
   const button = event.currentTarget;
-  const email = document.querySelector("#contact-email");
+  const details = document.querySelector("#contact-details");
   const isExpanded = button.getAttribute("aria-expanded") === "true";
   button.setAttribute("aria-expanded", String(!isExpanded));
-  email.hidden = isExpanded;
+  details.hidden = isExpanded;
+  if (isExpanded) document.querySelector("#contact-copy-status").textContent = "";
+});
+document.querySelector("#contact-copy").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const status = document.querySelector("#contact-copy-status");
+  try {
+    await navigator.clipboard.writeText("mca111725039126@gmail.com");
+    status.textContent = "Copied!";
+  } catch (error) {
+    console.error("Could not copy the contact email.", error);
+    status.textContent = "Could not copy. Select the email to copy it.";
+  }
 });
 window.addEventListener("pagehide", () => {
   if (!signedIn || !state.material) return;
