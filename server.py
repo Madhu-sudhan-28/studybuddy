@@ -495,6 +495,53 @@ def delete_storage_object(path):
     )
 
 
+def signed_storage_url(path, download=False):
+    base_url, _, bucket = supabase_storage_settings()
+    signed_path = (
+        f"object/sign/{urllib.parse.quote(bucket, safe='')}/"
+        f"{urllib.parse.quote(path, safe='/')}"
+    )
+    _, response_body = supabase_storage_request(
+        "POST",
+        signed_path,
+        json.dumps({"expiresIn": 300}).encode("utf-8"),
+        "application/json",
+    )
+    try:
+        signed_data = json.loads(response_body)
+    except json.JSONDecodeError as error:
+        raise SupabaseStorageError("Private image storage returned an invalid preview link.") from error
+    if not isinstance(signed_data, dict):
+        raise SupabaseStorageError("Private image storage returned an invalid preview link.")
+    signed_url = next(
+        (
+            signed_data.get(key)
+            for key in ("signedURL", "signedUrl", "url")
+            if isinstance(signed_data.get(key), str) and signed_data.get(key)
+        ),
+        "",
+    )
+    if not signed_url:
+        raise SupabaseStorageError("Private image storage did not provide a preview link.")
+    if signed_url.startswith(("https://", "http://")):
+        parsed_url = urllib.parse.urlsplit(signed_url)
+        parsed_base = urllib.parse.urlsplit(base_url)
+        if (parsed_url.scheme, parsed_url.netloc) != (parsed_base.scheme, parsed_base.netloc):
+            raise SupabaseStorageError("Private image storage returned an unsafe preview link.")
+    elif signed_url.startswith("/storage/v1/"):
+        signed_url = f"{base_url}{signed_url}"
+    else:
+        signed_url = f"{base_url}/storage/v1/{signed_url.lstrip('/')}"
+    if download:
+        parsed_url = urllib.parse.urlsplit(signed_url)
+        query = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+        query.append(("download", "1"))
+        signed_url = urllib.parse.urlunsplit(
+            parsed_url._replace(query=urllib.parse.urlencode(query))
+        )
+    return signed_url
+
+
 def sanitize_upload_file_name(raw_name):
     if not isinstance(raw_name, str) or len(raw_name) > 512:
         raise ValueError("The uploaded file name is invalid.")
@@ -1574,21 +1621,16 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             send_json(self, 410, {"error": "This image has expired and is no longer available."})
             return
         try:
-            _, body = supabase_storage_request("GET", image_storage_path(image["storage_path"]))
+            location = signed_storage_url(image["storage_path"], download=download)
         except (RuntimeError, SupabaseStorageError) as error:
             print(f"Study image download failed: {error}", file=sys.stderr)
             send_json(self, 503, {"error": "The image could not be downloaded right now. Please try again shortly."})
             return
-        disposition = "attachment" if download or image["content_type"] not in SUPPORTED_IMAGE_TYPES else "inline"
-        safe_name = urllib.parse.quote(image["file_name"], safe="")
-        self.send_response(200)
-        self.send_header("Content-Type", image["content_type"])
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{safe_name}")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_response(302)
+        self.send_header("Location", location)
         self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
-        self.wfile.write(body)
 
     def delete_stored_image(self, image_id):
         with database_connection() as connection:
