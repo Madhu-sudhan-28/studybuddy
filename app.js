@@ -448,6 +448,8 @@ function setAuthMode(mode = "login") {
   const emailInput = document.querySelector("#auth-email");
   const passwordInput = document.querySelector("#auth-password");
   const confirmPassword = document.querySelector("#auth-confirm-password");
+  setPasswordVisibility(passwordInput, false);
+  setPasswordVisibility(confirmPassword, false);
   if (modeChanged) {
     emailInput.value = "";
     passwordInput.value = "";
@@ -478,6 +480,17 @@ function setAuthMode(mode = "login") {
     : "";
   if (!registering) confirmPassword.value = "";
   authError.textContent = "";
+}
+
+function setPasswordVisibility(input, visible) {
+  const toggle = document.querySelector(`[data-password-toggle="${input.id}"]`);
+  if (!toggle) return;
+  input.type = visible ? "text" : "password";
+  toggle.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+  toggle.setAttribute("aria-pressed", String(visible));
+  const [eyeOpen, eyeClosed] = toggle.querySelectorAll("svg");
+  eyeOpen.hidden = visible;
+  eyeClosed.hidden = !visible;
 }
 
 async function enterApp(user, progress) {
@@ -2520,6 +2533,13 @@ helpDialog.addEventListener("click", (event) => {
 const date = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date());
 document.querySelector("#today-date").textContent = date;
 renderDailyHours(Number(studyDaysInput.value), state.schedule);
+authForm.querySelectorAll("[data-password-toggle]").forEach((toggle) => {
+  toggle.addEventListener("click", () => {
+    const input = document.getElementById(toggle.dataset.passwordToggle);
+    if (input) setPasswordVisibility(input, input.type === "password");
+  });
+});
+
 document.querySelector("#auth-toggle").addEventListener("click", () => {
   setAuthMode(authMode === "login" ? "register" : "login");
 });

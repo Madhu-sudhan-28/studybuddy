@@ -24,6 +24,12 @@ h2 { margin: 0; font-size: 21px; }
 form label { display: block; margin: 20px 0 8px; font-size: 13px; font-weight: 700; }
 form input { width: 100%; height: 46px; padding: 0 12px; border: 1px solid #dfe5dc; border-radius: 7px; font: inherit; }
 form input:focus { outline: 3px solid #94b9a155; border-color: #78987c; }
+.password-field { position: relative; }
+.password-field input { padding-right: 48px; }
+.password-toggle { position: absolute; top: 50%; right: 7px; width: 34px; height: 34px; display: grid; place-items: center; padding: 0; transform: translateY(-50%); border: 0; border-radius: 6px; background: transparent; color: #64756a; cursor: pointer; }
+.password-toggle:hover { background: #eaf0e9; color: #285b43; }
+.password-toggle:focus-visible { outline: 2px solid #78987c; outline-offset: 1px; }
+.password-toggle svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .button { min-height: 38px; padding: 0 15px; border: 0; border-radius: 7px; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
 .button:disabled { opacity: .6; cursor: wait; }
 .primary { width: 100%; color: white; background: #235842; }

@@ -1,6 +1,10 @@
 const loginPanel = document.querySelector("#admin-login-panel");
 const loginForm = document.querySelector("#admin-login-form");
 const loginError = document.querySelector("#admin-login-error");
+const adminPassword = document.querySelector("#admin-password");
+const passwordToggle = document.querySelector("#toggle-admin-password");
+const passwordEyeOpen = document.querySelector("#password-eye-open");
+const passwordEyeClosed = document.querySelector("#password-eye-closed");
 const dashboard = document.querySelector("#admin-dashboard");
 const loading = document.querySelector("#admin-loading");
 const pageError = document.querySelector("#admin-error");
@@ -12,6 +16,7 @@ const userHistoryTitle = document.querySelector("#user-history-title");
 const userHistoryContent = document.querySelector("#user-history-content");
 const userHistoryError = document.querySelector("#user-history-error");
 const userHistoryCache = new Map();
+const userHistoryImages = new Map();
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
@@ -116,7 +121,7 @@ function renderHistoryImages(images) {
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>Uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
-        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download</a></div>
+        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download to device</a></div>
       </div>
     </article>`).join("")}</div>` : '<p class="empty">No retained images.</p>';
 }
@@ -130,8 +135,9 @@ function renderUserHistory(result) {
         <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
       </div>
       <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
-      ${renderHistoryImages(item.images)}
     </article>`).join("") : '<p class="empty">No saved study history.</p>';
+  userHistoryImages.clear();
+  result.history.forEach((item) => userHistoryImages.set(Number(item.id), item.images));
   const unlinkedImages = result.unlinkedImages.length ? `
     <section class="history-uploads">
       <h3>Other retained uploads</h3>${renderHistoryImages(result.unlinkedImages)}
@@ -151,6 +157,7 @@ async function loadUserHistory(userId) {
   userHistoryTitle.textContent = "User history";
   userHistoryPanel.dataset.userId = userId;
   userHistoryCache.clear();
+  userHistoryImages.clear();
   userHistoryPanel.hidden = false;
   userHistoryPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
@@ -182,9 +189,11 @@ async function loadUserPlanDetails(historyId, button) {
     const result = await api(`/api/admin/users/${activeUserId}/history/${historyId}`);
     const progress = result.progress && typeof result.progress === "object" ? result.progress : {};
     const material = typeof progress.material === "string" ? progress.material : "";
+    const images = userHistoryImages.get(Number(historyId)) || [];
     const detailsHtml = `
       ${material ? `<h4>Study material</h4><pre>${escapeHtml(material)}</pre>` : ""}
-      <h4>Saved progress</h4><pre>${escapeHtml(JSON.stringify(progress, null, 2))}</pre>`;
+      <h4>Saved progress</h4><pre>${escapeHtml(JSON.stringify(progress, null, 2))}</pre>
+      <section class="plan-images"><h4>Images uploaded with this plan</h4>${renderHistoryImages(images)}</section>`;
     userHistoryCache.set(historyId, detailsHtml);
     details.innerHTML = detailsHtml;
     details.hidden = false;
@@ -199,24 +208,38 @@ async function loadUserPlanDetails(historyId, button) {
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   loginError.textContent = "";
-  const password = document.querySelector("#admin-password");
-  if (!password.value) {
+  if (!adminPassword.value) {
     loginError.textContent = "Enter the admin password.";
-    password.focus();
+    adminPassword.focus();
     return;
   }
   try {
     await api("/api/admin/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: password.value }),
+      body: JSON.stringify({ password: adminPassword.value }),
     });
-    password.value = "";
+    adminPassword.value = "";
+    adminPassword.type = "password";
+    passwordToggle.setAttribute("aria-label", "Show password");
+    passwordToggle.setAttribute("aria-pressed", "false");
+    passwordEyeOpen.hidden = false;
+    passwordEyeClosed.hidden = true;
     showState(true);
     await loadAdminData();
   } catch (error) {
     loginError.textContent = error.message;
   }
+});
+
+passwordToggle.addEventListener("click", () => {
+  const isVisible = adminPassword.type === "text";
+  adminPassword.type = isVisible ? "password" : "text";
+  passwordToggle.setAttribute("aria-label", isVisible ? "Show password" : "Hide password");
+  passwordToggle.setAttribute("aria-pressed", String(!isVisible));
+  passwordEyeOpen.hidden = !isVisible;
+  passwordEyeClosed.hidden = isVisible;
+  adminPassword.focus();
 });
 
 logoutButton.addEventListener("click", async () => {
