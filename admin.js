@@ -7,6 +7,11 @@ const pageError = document.querySelector("#admin-error");
 const logoutButton = document.querySelector("#admin-logout");
 const imagesContainer = document.querySelector("#admin-images");
 const usersContainer = document.querySelector("#admin-users");
+const userHistoryPanel = document.querySelector("#user-history-panel");
+const userHistoryTitle = document.querySelector("#user-history-title");
+const userHistoryContent = document.querySelector("#user-history-content");
+const userHistoryError = document.querySelector("#user-history-error");
+const userHistoryCache = new Map();
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
@@ -74,7 +79,7 @@ function renderImages(images) {
 function renderUsers(users) {
   usersContainer.innerHTML = users.length ? users.map((user) => `
     <tr>
-      <td>${escapeHtml(user.email)}</td>
+      <td><button class="user-history-link" type="button" data-user-history="${Number(user.id)}">${escapeHtml(user.email)}</button></td>
       <td>${escapeHtml(user.auth_provider)}</td>
       <td>${dateText(user.created_at)}</td>
       <td>${Number(user.image_count)}</td>
@@ -99,6 +104,96 @@ function renderUsers(users) {
       }
     });
   });
+  usersContainer.querySelectorAll("[data-user-history]").forEach((button) => {
+    button.addEventListener("click", () => loadUserHistory(Number(button.dataset.userHistory)));
+  });
+}
+
+function renderHistoryImages(images) {
+  return images.length ? `<div class="image-grid">${images.map((image) => `
+    <article class="image-card">
+      <img src="${escapeHtml(image.previewUrl)}" alt="Image uploaded by this user" loading="lazy" />
+      <div class="image-card-body">
+        <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
+        <small>Uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
+        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download</a></div>
+      </div>
+    </article>`).join("")}</div>` : '<p class="empty">No retained images.</p>';
+}
+
+function renderUserHistory(result) {
+  userHistoryTitle.textContent = `History for ${result.user.email}`;
+  const histories = result.history.length ? result.history.map((item) => `
+    <article class="history-record">
+      <div class="history-record-heading">
+        <div><h3>${escapeHtml(item.title)}</h3><small>${dateText(item.createdAt)}</small></div>
+        <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
+      </div>
+      <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
+      ${renderHistoryImages(item.images)}
+    </article>`).join("") : '<p class="empty">No saved study history.</p>';
+  const unlinkedImages = result.unlinkedImages.length ? `
+    <section class="history-uploads">
+      <h3>Other retained uploads</h3>${renderHistoryImages(result.unlinkedImages)}
+    </section>` : "";
+  userHistoryContent.innerHTML = `${histories}${unlinkedImages}`;
+  userHistoryContent.querySelectorAll("[data-view-plan]").forEach((button) => {
+    button.addEventListener("click", () => loadUserPlanDetails(
+      Number(button.dataset.viewPlan),
+      button,
+    ));
+  });
+}
+
+async function loadUserHistory(userId) {
+  userHistoryError.textContent = "";
+  userHistoryContent.innerHTML = '<p class="loading">Loading this user’s history…</p>';
+  userHistoryTitle.textContent = "User history";
+  userHistoryPanel.dataset.userId = userId;
+  userHistoryCache.clear();
+  userHistoryPanel.hidden = false;
+  userHistoryPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const result = await api(`/api/admin/users/${userId}/history`);
+    renderUserHistory(result);
+  } catch (error) {
+    userHistoryContent.innerHTML = "";
+    userHistoryError.textContent = error.message;
+  }
+}
+
+async function loadUserPlanDetails(historyId, button) {
+  const details = userHistoryContent.querySelector(`[data-plan-details="${historyId}"]`);
+  if (!details) return;
+  if (!details.hidden) {
+    details.hidden = true;
+    button.textContent = "View saved plan";
+    return;
+  }
+  if (userHistoryCache.has(historyId)) {
+    details.innerHTML = userHistoryCache.get(historyId);
+    details.hidden = false;
+    button.textContent = "Hide saved plan";
+    return;
+  }
+  button.disabled = true;
+  try {
+    const activeUserId = Number(userHistoryPanel.dataset.userId);
+    const result = await api(`/api/admin/users/${activeUserId}/history/${historyId}`);
+    const progress = result.progress && typeof result.progress === "object" ? result.progress : {};
+    const material = typeof progress.material === "string" ? progress.material : "";
+    const detailsHtml = `
+      ${material ? `<h4>Study material</h4><pre>${escapeHtml(material)}</pre>` : ""}
+      <h4>Saved progress</h4><pre>${escapeHtml(JSON.stringify(progress, null, 2))}</pre>`;
+    userHistoryCache.set(historyId, detailsHtml);
+    details.innerHTML = detailsHtml;
+    details.hidden = false;
+    button.textContent = "Hide saved plan";
+  } catch (error) {
+    userHistoryError.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -135,6 +230,11 @@ logoutButton.addEventListener("click", async () => {
 document.querySelector("#admin-refresh").addEventListener("click", () => loadAdminData().catch((error) => {
   pageError.textContent = error.message;
 }));
+document.querySelector("#close-user-history").addEventListener("click", () => {
+  userHistoryPanel.hidden = true;
+  userHistoryContent.innerHTML = "";
+  userHistoryCache.clear();
+});
 
 api("/api/admin/session")
   .then(async (result) => {

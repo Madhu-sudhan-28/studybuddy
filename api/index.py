@@ -59,7 +59,7 @@ class handler(StudyBuddyHandler):
             "/api/admin/users",
             "/api/admin/images",
             "/api/history",
-        } or path.startswith(("/api/history/", "/api/images/", "/api/admin/images/")) or path == "/api/cron/cleanup-images":
+        } or path.startswith(("/api/history/", "/api/images/", "/api/admin/images/", "/api/admin/users/")) or path == "/api/cron/cleanup-images":
             if not try_initialize_database(self):
                 return
         super().do_GET()

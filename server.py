@@ -755,6 +755,102 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 ).fetchall()
             send_json(self, 200, {"users": users})
             return
+        admin_user_history_match = re.fullmatch(r"/api/admin/users/(\d+)/history", request_path)
+        if admin_user_history_match:
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            user_id = int(admin_user_history_match.group(1))
+            now = int(time.time())
+            with database_connection() as connection:
+                user = connection.execute(
+                    "SELECT id, email FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+                if not user:
+                    send_json(self, 404, {"error": "That user account could not be found."})
+                    return
+                history_rows = connection.execute(
+                    "SELECT id, plan_id, progress_json, created_at FROM study_history "
+                    "WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+                    (user_id,),
+                ).fetchall()
+                image_rows = connection.execute(
+                    "SELECT id, plan_id, file_name, content_type, file_size, uploaded_at, expires_at "
+                    "FROM uploaded_images WHERE user_id = ? AND expires_at > ? "
+                    "ORDER BY uploaded_at DESC, id DESC",
+                    (user_id, now),
+                ).fetchall()
+            images = [
+                dict(
+                    image,
+                    previewUrl=f"/api/admin/images/{image['id']}/preview",
+                    downloadUrl=f"/api/admin/images/{image['id']}/download",
+                )
+                for image in image_rows
+            ]
+            images_by_plan = {}
+            for image in images:
+                if image["plan_id"]:
+                    images_by_plan.setdefault(image["plan_id"], []).append(image)
+            histories = []
+            history_plan_ids = set()
+            for row in history_rows:
+                try:
+                    progress = json.loads(row["progress_json"])
+                except json.JSONDecodeError:
+                    progress = {}
+                if not isinstance(progress, dict):
+                    progress = {}
+                topics = progress.get("topics") if isinstance(progress.get("topics"), list) else []
+                first_title = topics[0].get("title") if topics and isinstance(topics[0], dict) else ""
+                material = progress.get("material") if isinstance(progress.get("material"), str) else ""
+                title = first_title or next(
+                    (line.strip() for line in material.splitlines() if line.strip()),
+                    "Study plan",
+                )
+                plan_id = row["plan_id"]
+                history_plan_ids.add(plan_id)
+                histories.append({
+                    "id": row["id"],
+                    "planId": plan_id,
+                    "title": title[:100],
+                    "createdAt": row["created_at"],
+                    "images": images_by_plan.get(plan_id, []),
+                })
+            unlinked_images = [
+                image for image in images if image["plan_id"] not in history_plan_ids
+            ]
+            send_json(
+                self,
+                200,
+                {
+                    "user": user,
+                    "history": histories,
+                    "unlinkedImages": unlinked_images,
+                },
+            )
+            return
+        admin_user_history_item_match = re.fullmatch(
+            r"/api/admin/users/(\d+)/history/(\d+)", request_path
+        )
+        if admin_user_history_item_match:
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            user_id, history_id = map(int, admin_user_history_item_match.groups())
+            with database_connection() as connection:
+                row = connection.execute(
+                    "SELECT progress_json FROM study_history WHERE id = ? AND user_id = ?",
+                    (history_id, user_id),
+                ).fetchone()
+            if not row:
+                send_json(self, 404, {"error": "That saved study plan could not be found."})
+                return
+            try:
+                send_json(self, 200, {"progress": json.loads(row["progress_json"])})
+            except json.JSONDecodeError:
+                send_json(self, 500, {"error": "That saved study plan could not be read."})
+            return
         if request_path == "/api/admin/images":
             if not admin_authenticated(self):
                 send_json(self, 401, {"error": "Admin sign-in is required."})

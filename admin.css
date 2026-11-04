@@ -54,5 +54,15 @@ th { color: #7b887e; font-size: 10px; letter-spacing: .7px; text-transform: uppe
 td.actions { display: flex; gap: 6px; }
 td .button { min-height: 30px; padding: 0 9px; font-size: 11px; }
 td .danger { color: #a33d32; background: #f9eae7; }
+.user-history-link { padding: 0; border: 0; background: none; color: #285b43; font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.history-record { padding: 18px 0; border-top: 1px solid #eceee8; }
+.history-record-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.history-record-heading h3, .history-uploads h3 { margin: 0 0 5px; font-size: 15px; }
+.history-record-heading small { color: #758279; font-size: 11px; }
+.user-plan-details { margin: 14px 0; padding: 14px; border-radius: 8px; background: #f7f8f4; }
+.user-plan-details h4 { margin: 0 0 8px; font-size: 12px; }
+.user-plan-details pre { max-height: 400px; margin: 0 0 14px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #4c5b51; font: 11px/1.6 Consolas, monospace; }
+.history-uploads { margin-top: 20px; padding-top: 18px; border-top: 1px solid #eceee8; }
+.history-uploads h3 { margin-bottom: 12px; }
 footer { padding: 20px; color: #929b92; font-size: 11px; text-align: center; }
 @media (max-width: 750px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stats-grid .stat:last-child { grid-column: span 2; } main { margin-top: 24px; } .section-panel { padding: 16px; } }
