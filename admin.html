@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f7f2" />
+    <title>StudyBuddy Admin</title>
+    <link rel="icon" type="image/svg+xml" href="/studybuddy-icon.svg" />
+    <link rel="stylesheet" href="/admin.css" />
+    <script src="/admin.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="StudyBuddy home">
+        <img src="/studybuddy-icon.svg" alt="" />
+        <span>study<span class="accent">buddy</span> <small>ADMIN</small></span>
+      </a>
+      <button id="admin-logout" class="button secondary" type="button" hidden>Sign out</button>
+    </header>
+    <main>
+      <section id="admin-login-panel" class="panel login-panel" hidden>
+        <h1>Admin sign in</h1>
+        <p>Sign in with the private admin password configured for StudyBuddy.</p>
+        <form id="admin-login-form" novalidate>
+          <label for="admin-password">Admin password</label>
+          <input id="admin-password" type="password" autocomplete="current-password" required />
+          <p id="admin-login-error" class="error" role="alert"></p>
+          <button class="button primary" type="submit">Sign in</button>
+        </form>
+      </section>
+      <section id="admin-dashboard" hidden>
+        <div class="page-heading">
+          <div><p class="eyebrow">SITE MANAGEMENT</p><h1>Admin dashboard</h1></div>
+          <button id="admin-refresh" class="button secondary" type="button">Refresh</button>
+        </div>
+        <p id="admin-error" class="error" role="alert"></p>
+        <section class="stats-grid" aria-label="Site statistics">
+          <article class="stat panel"><span>Total users</span><strong id="stat-users">—</strong></article>
+          <article class="stat panel"><span>Active users</span><strong id="stat-active-users">—</strong></article>
+          <article class="stat panel"><span>Disabled users</span><strong id="stat-disabled-users">—</strong></article>
+          <article class="stat panel"><span>Saved study plans</span><strong id="stat-plans">—</strong></article>
+          <article class="stat panel"><span>Stored images</span><strong id="stat-images">—</strong></article>
+        </section>
+        <section class="panel section-panel">
+          <div class="section-heading"><div><p class="eyebrow">PRIVATE FILES</p><h2>Uploaded images</h2></div></div>
+          <div id="admin-images" class="image-grid" aria-live="polite"></div>
+        </section>
+        <section class="panel section-panel">
+          <div class="section-heading"><div><p class="eyebrow">ACCOUNTS</p><h2>Users</h2></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Email</th><th>Sign-in</th><th>Created</th><th>Images</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody id="admin-users"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+      <p id="admin-loading" class="loading">Loading admin access…</p>
+    </main>
+    <footer>StudyBuddy admin tools. Keep this page and its password private.</footer>
+  </body>
+</html>

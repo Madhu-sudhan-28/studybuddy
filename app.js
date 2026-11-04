@@ -61,6 +61,7 @@ const memoryStyles = {
 
 const state = {
   planId: null,
+  imageId: null,
   material: "",
   inputMaterial: "",
   inputKind: "text",
@@ -104,8 +105,10 @@ let toastTimer;
 let imagePreviewUrl = "";
 let ocrEnginePromise;
 let visionAvailable = false;
+let imageStorageAvailable = false;
 let imageMaterialReady = false;
 let imageLessonMaterial = "";
+let preparedStudyImage = null;
 
 function showToast(message) {
   toast.textContent = message;
@@ -124,13 +127,18 @@ async function refreshVisionStatus() {
     if (!response.ok) throw new Error(`Status check failed (${response.status}).`);
     const status = await response.json();
     visionAvailable = status.aiConfigured === true || status.aiAvailable === true || status.visionAvailable === true;
+    imageStorageAvailable = status.imageStorageAvailable === true;
     materialHint.textContent = visionAvailable
       ? "The AI tutor is ready for education questions and study topics. Add notes when you want lessons grounded in your course material."
       : "Guided lessons and quizzes are currently unavailable. Images can still be read with basic text recognition.";
+    document.querySelector("#image-retention-note").textContent = imageStorageAvailable
+      ? "Images used in a study plan are stored privately for 30 days. You can view and download them from Study history; admins can manage stored images."
+      : "Image history is not configured yet. You can still study from images, but they will not be saved for later download.";
     return visionAvailable;
   } catch (error) {
     console.error("Could not check image understanding status.", error);
     visionAvailable = false;
+    imageStorageAvailable = false;
     materialHint.textContent = FRIENDLY_ERROR;
     return false;
   }
@@ -178,6 +186,7 @@ function progressSnapshot() {
     version: 1,
     lessonVersion: 20,
     planId: state.planId,
+    imageId: state.imageId,
     material: state.material,
     inputMaterial: state.inputMaterial,
     inputKind: state.inputKind,
@@ -211,9 +220,11 @@ function progressSnapshot() {
 
 function resetStudyState() {
   state.planId = null;
+  state.imageId = null;
   state.material = "";
   state.inputMaterial = "";
   state.inputKind = "text";
+  preparedStudyImage = null;
   state.topics = [];
   state.schedule = [1, 1, 1];
   state.memoryStyle = "mixed";
@@ -318,6 +329,7 @@ function restoreProgress(saved, persist = true) {
   if (!saved || typeof saved.material !== "string" || !saved.material.trim()) return false;
   const originalMaterial = saved.material;
   state.planId = typeof saved.planId === "string" && saved.planId ? saved.planId : createPlanId();
+  state.imageId = Number.isInteger(saved.imageId) && saved.imageId > 0 ? saved.imageId : null;
   const previousTopics = splitIntoTopics(originalMaterial).slice(0, MAX_PLAN_TOPICS);
   state.material = cleanExtractedStudyText(originalMaterial);
   state.topics = splitIntoTopics(state.material).slice(0, MAX_PLAN_TOPICS);
@@ -513,12 +525,15 @@ async function loadStudyHistory() {
     document.querySelector("#history-count").textContent = `${items.length} saved ${items.length === 1 ? "plan" : "plans"}`;
     historyList.innerHTML = items.length
       ? items.map((item) => `
-        <button class="history-item" type="button" data-history-id="${Number(item.id)}">
-          <span class="history-item-copy"><strong>${escapeHtml(item.title || "Study plan")}</strong><small>${new Date(item.createdAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</small></span>
-          <span class="history-item-action">Open lessons <span aria-hidden="true">→</span></span>
-        </button>`).join("")
+        <article class="history-item">
+          <button class="history-open" type="button" data-history-id="${Number(item.id)}">
+            <span class="history-item-copy"><strong>${escapeHtml(item.title || "Study plan")}</strong><small>${new Date(item.createdAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</small></span>
+            <span class="history-item-action">Open lessons <span aria-hidden="true">→</span></span>
+          </button>
+          ${item.image ? `<div class="history-image"><img src="${escapeHtml(item.image.previewUrl)}" alt="Image saved with this study plan" loading="lazy" /><div><strong>${escapeHtml(item.image.fileName)}</strong><a href="${escapeHtml(item.image.downloadUrl)}">Download image</a></div></div>` : ""}
+        </article>`).join("")
       : '<p class="history-empty">Your earlier plans will appear here when you start a new one.</p>';
-    historyList.querySelectorAll("[data-history-id]").forEach((button) => {
+    historyList.querySelectorAll(".history-open").forEach((button) => {
       button.addEventListener("click", () => openStudyHistory(Number(button.dataset.historyId)));
     });
   } catch (error) {
@@ -554,6 +569,7 @@ async function loadSignedInSession() {
       google_cancelled: "Google sign-in was cancelled.",
       google_invalid_state: "This Google sign-in request expired or could not be verified. Please try again.",
       google_email_in_use: "This email already has an email-and-password account. Sign in with that method instead.",
+      account_disabled: "This account has been disabled. Contact StudyBuddy support.",
       google_failed: "Google sign-in could not be completed. Please try again.",
     };
     if (authErrorCode && authErrors[authErrorCode]) {
@@ -983,8 +999,9 @@ function formatHours(hours) {
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} ${hours === 1 ? "hour" : "hours"}`;
 }
 
-function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text", examDate = "") {
+function createPlan(material, schedule, topics = splitIntoTopics(material), inputMaterial = material, inputKind = "text", examDate = "", imageId = null) {
   state.planId = createPlanId();
+  state.imageId = imageId;
   state.material = material;
   state.inputMaterial = inputMaterial;
   state.inputKind = inputKind;
@@ -2137,6 +2154,7 @@ function shuffle(items) {
 materialInput.addEventListener("input", () => {
   if (fileInput.files?.length) {
     fileInput.value = "";
+    preparedStudyImage = null;
     setImagePreview(null);
     imageLessonMaterial = "";
     imageMaterialReady = false;
@@ -2150,6 +2168,7 @@ materialInput.addEventListener("input", () => {
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
+  preparedStudyImage = null;
   formError.textContent = "";
   if (file.size > 10 * 1024 * 1024) {
     formError.textContent = FRIENDLY_ERROR;
@@ -2241,8 +2260,10 @@ fileInput.addEventListener("change", async () => {
       } else {
         fileStatus.textContent = "Text extracted from the image. Review it in the notes box below.";
       }
+      preparedStudyImage = preparedImage;
       imageMaterialReady = true;
     } else {
+      preparedStudyImage = null;
       materialInput.value = cleanText(await file.text(), file.name).trim();
       fileLabel.textContent = file.name;
       fileStatus.textContent = "Text file ready to study.";
@@ -2251,8 +2272,11 @@ fileInput.addEventListener("change", async () => {
     showToast(isImage ? "Study-ready content from your image is ready." : "Your file is ready to study.");
   } catch (error) {
     console.error(isImage ? "Could not analyze uploaded image." : "Could not read uploaded file.", error);
-    formError.textContent = FRIENDLY_ERROR;
-    fileStatus.textContent = FRIENDLY_ERROR;
+    const message = error instanceof Error && error.message !== "Failed to fetch"
+      ? error.message
+      : FRIENDLY_ERROR;
+    formError.textContent = message;
+    fileStatus.textContent = message;
   } finally {
     materialInput.disabled = false;
     submitButton.disabled = false;
@@ -2331,7 +2355,7 @@ examDateInput.addEventListener("change", () => {
   if (formError.textContent) formError.textContent = "";
 });
 
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const material = cleanExtractedStudyText(getStudyMaterial());
   if (!material.trim()) {
@@ -2369,8 +2393,44 @@ form.addEventListener("submit", (event) => {
   const inputKind = imageLessonMaterial
     ? inputMaterial ? "mixed-image" : "visual-image"
     : imageMaterialReady ? "image-text" : "text";
-  createPlan(material, schedule, topics, inputMaterial, inputKind, examDateInput.value);
-  if (topics.length === 1) {
+  let imageId = null;
+  let imageSaveWarning = false;
+  if (preparedStudyImage && imageStorageAvailable) {
+    submitButton.disabled = true;
+    fileStatus.textContent = "Saving your image privately for 30 days…";
+    try {
+      const imageData = await readAsDataUrl(preparedStudyImage);
+      const response = await fetch("/api/images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: imageData, fileName: preparedStudyImage.name || "study-image" }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
+      if (!Number.isInteger(result.image?.id) || result.image.id <= 0) {
+        throw new Error("The image could not be saved to your history.");
+      }
+      imageId = result.image.id;
+      fileStatus.textContent = "Image saved privately for 30 days and linked to this study plan.";
+      preparedStudyImage = null;
+    } catch (error) {
+      console.error("Could not save uploaded image.", error);
+      const reason = error instanceof Error && error.message !== "Failed to fetch"
+        ? error.message
+        : FRIENDLY_ERROR;
+      fileStatus.textContent = `Your study plan will still be created, but the image could not be saved for later. ${reason}`;
+      preparedStudyImage = null;
+      imageSaveWarning = true;
+    }
+  } else if (preparedStudyImage) {
+    fileStatus.textContent = "Image analyzed. It is not saved for later because private image storage is not configured.";
+    preparedStudyImage = null;
+  }
+  submitButton.disabled = false;
+  createPlan(material, schedule, topics, inputMaterial, inputKind, examDateInput.value, imageId);
+  if (imageSaveWarning) {
+    showToast("Study plan created, but the image was not saved for later.");
+  } else if (topics.length === 1) {
     showToast("One topic found. Add blank lines between sections for a more detailed plan.");
   } else {
     showToast(`${topics.length} topics ready. Your learning room is waiting.`);

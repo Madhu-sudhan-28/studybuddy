@@ -54,8 +54,12 @@ class handler(StudyBuddyHandler):
             "/api/auth/session",
             "/api/auth/google/start",
             "/api/auth/google/callback",
+            "/api/admin/session",
+            "/api/admin/stats",
+            "/api/admin/users",
+            "/api/admin/images",
             "/api/history",
-        } or path.startswith("/api/history/"):
+        } or path.startswith(("/api/history/", "/api/images/", "/api/admin/images/")) or path == "/api/cron/cleanup-images":
             if not try_initialize_database(self):
                 return
         super().do_GET()
@@ -67,12 +71,23 @@ class handler(StudyBuddyHandler):
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/logout",
+            "/api/admin/login",
+            "/api/admin/logout",
             "/api/progress",
+            "/api/images",
             "/api/extract-image",
             "/api/generate-lesson",
             "/api/generate-quiz",
             "/api/explain-part",
-        }:
+        } or path.startswith("/api/admin/users/"):
             if not try_initialize_database(self):
                 return
         super().do_POST()
+
+    def do_DELETE(self):
+        self.restore_api_path()
+        path = urlsplit(self.path).path
+        if path.startswith(("/api/admin/images/", "/api/admin/users/")):
+            if not try_initialize_database(self):
+                return
+        super().do_DELETE()

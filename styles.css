@@ -104,12 +104,19 @@ h1 { margin-bottom: 7px; color: #293d33; font: 700 clamp(30.5px, 3vw, 40.5px)/1.
 .history-heading .section-kicker { color: #89958b; font-size: 10px; letter-spacing: 1px; }
 .history-count { color: #89958b; font-size: 11.5px; }
 .history-list { display: grid; gap: 8px; }
-.history-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 12px 13px; border: 1px solid #eceee7; border-radius: 8px; background: #fffefa; color: #48564c; text-align: left; cursor: pointer; }
+.history-item { padding: 12px 13px; border: 1px solid #eceee7; border-radius: 8px; background: #fffefa; color: #48564c; }
+.history-open { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .history-item:hover { border-color: #b7c9b0; background: #f7faf4; }
 .history-item-copy { display: grid; gap: 4px; min-width: 0; }
 .history-item-copy strong { overflow: hidden; color: #33443a; font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .history-item-copy small, .history-item-action { color: #89958b; font-size: 10.5px; }
 .history-item-action { flex: 0 0 auto; color: #577a5d; font-weight: 600; }
+.history-image { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eff0ea; }
+.history-image img { width: 76px; height: 58px; object-fit: cover; border-radius: 6px; background: #f1f3ee; }
+.history-image div { display: grid; gap: 5px; min-width: 0; }
+.history-image strong { overflow: hidden; color: #59685d; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.history-image a { color: #577a5d; font-size: 11px; font-weight: 700; }
+.image-retention-note { margin: -7px 0 14px; color: #879188; font-size: 10.5px; line-height: 1.5; }
 .history-empty { margin: 0; padding: 12px 0; color: #89958b; font-size: 11.5px; }
 .card-heading { display: flex; align-items: center; gap: 13px; margin-bottom: 23px; }
 .step-number { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #e6ebe2; border-radius: 9px; background: #f4f6f0; color: #68816a; font: 700 12.5px Manrope, sans-serif; }

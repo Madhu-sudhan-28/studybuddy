@@ -2,8 +2,18 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
+      "source": "/admin",
+      "destination": "/admin.html"
+    },
+    {
       "source": "/api/:path*",
       "destination": "/api?__studybuddy_route=:path*"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/cleanup-images",
+      "schedule": "0 0 * * *"
     }
   ]
 }

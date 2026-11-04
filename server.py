@@ -37,13 +37,23 @@ MAX_FOLLOW_UP_QUESTION_CHARS = 2000
 MAX_IMAGE_OUTPUT_TOKENS = 1800
 ENV_FILE = ROOT / ".env"
 DATABASE_URL_NAME = "DATABASE_URL"
+SUPABASE_URL_NAME = "SUPABASE_URL"
+SUPABASE_SERVICE_ROLE_KEY_NAME = "SUPABASE_SERVICE_ROLE_KEY"
+SUPABASE_STORAGE_BUCKET_NAME = "SUPABASE_STORAGE_BUCKET"
+ADMIN_PASSWORD_NAME = "STUDYBUDDY_ADMIN_PASSWORD"
+CRON_SECRET_NAME = "CRON_SECRET"
 GOOGLE_CLIENT_ID_NAME = "GOOGLE_CLIENT_ID"
 GOOGLE_CLIENT_SECRET_NAME = "GOOGLE_CLIENT_SECRET"
 GOOGLE_REDIRECT_URI_NAME = "GOOGLE_REDIRECT_URI"
 AUTH_COOKIE = "studybuddy_session"
+ADMIN_COOKIE = "studybuddy_admin"
 GOOGLE_OAUTH_COOKIE = "studybuddy_google_oauth"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60
 GOOGLE_OAUTH_TTL_SECONDS = 10 * 60
+IMAGE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+ADMIN_LOGIN_WINDOW_SECONDS = 15 * 60
+ADMIN_LOGIN_MAX_ATTEMPTS = 5
 MAX_PROGRESS_BYTES = 8 * 1024 * 1024
 PASSWORD_ITERATIONS = 310_000
 
@@ -146,9 +156,31 @@ def initialize_database():
                 UNIQUE(user_id, plan_id)
             );
             CREATE INDEX IF NOT EXISTS study_history_user_created ON study_history(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS uploaded_images (
+                id {id_type},
+                user_id {user_id_type} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                plan_id TEXT,
+                storage_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                file_size BIGINT NOT NULL,
+                uploaded_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS uploaded_images_user_plan ON uploaded_images(user_id, plan_id);
+            CREATE INDEX IF NOT EXISTS uploaded_images_expires ON uploaded_images(expires_at);
+            CREATE TABLE IF NOT EXISTS admin_login_attempts (
+                ip_hash TEXT PRIMARY KEY,
+                window_started_at INTEGER NOT NULL,
+                failed_count INTEGER NOT NULL,
+                locked_until INTEGER NOT NULL DEFAULT 0
+            );
         """)
         connection.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'google'"
+        )
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT FALSE"
         )
         updated_at_column = connection.execute(
             "SELECT data_type FROM information_schema.columns "
@@ -189,8 +221,165 @@ def authenticated_user(handler):
     with database_connection() as connection:
         return connection.execute(
             "SELECT users.id, users.email FROM login_sessions JOIN users ON users.id = login_sessions.user_id "
+            "AND users.is_disabled = FALSE "
             "WHERE token_hash = ? AND expires_at > ?", (token_hash, now),
         ).fetchone()
+
+
+def admin_password():
+    return os.environ.get(ADMIN_PASSWORD_NAME, "")
+
+
+def admin_cookie_from(handler):
+    for cookie in handler.headers.get("Cookie", "").split(";"):
+        name, separator, value = cookie.strip().partition("=")
+        if separator and name == ADMIN_COOKIE:
+            return value
+    return ""
+
+
+def admin_cookie_value(handler, token, max_age=ADMIN_SESSION_TTL_SECONDS):
+    secure = "; Secure" if handler.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https" else ""
+    return f"{ADMIN_COOKIE}={token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
+
+
+def admin_session_token(password, timestamp=None):
+    timestamp = int(time.time()) if timestamp is None else timestamp
+    nonce = secrets.token_urlsafe(24)
+    payload = f"{timestamp}.{nonce}"
+    signature = hmac.new(password.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def admin_authenticated(handler):
+    password = admin_password()
+    token = admin_cookie_from(handler)
+    parts = token.split(".")
+    if not password or len(parts) != 3:
+        return False
+    timestamp_text, nonce, signature = parts
+    if not timestamp_text.isdigit() or not nonce:
+        return False
+    timestamp = int(timestamp_text)
+    now = int(time.time())
+    if timestamp > now + 60 or now - timestamp > ADMIN_SESSION_TTL_SECONDS:
+        return False
+    payload = f"{timestamp_text}.{nonce}"
+    expected = hmac.new(password.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def supabase_storage_settings():
+    base_url = os.environ.get(SUPABASE_URL_NAME, "").strip().rstrip("/")
+    service_key = os.environ.get(SUPABASE_SERVICE_ROLE_KEY_NAME, "").strip()
+    bucket = os.environ.get(SUPABASE_STORAGE_BUCKET_NAME, "studybuddy-uploads").strip()
+    parsed_url = urllib.parse.urlsplit(base_url)
+    if (
+        not base_url
+        or parsed_url.scheme not in {"https", "http"}
+        or not parsed_url.netloc
+        or (
+            parsed_url.scheme == "http"
+            and parsed_url.hostname not in {"localhost", "127.0.0.1"}
+        )
+        or parsed_url.path not in {"", "/"}
+        or parsed_url.query
+        or parsed_url.fragment
+        or not service_key
+        or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]", bucket)
+    ):
+        raise RuntimeError(
+            "Private image storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+        )
+    return base_url, service_key, bucket
+
+
+def image_storage_configured():
+    try:
+        supabase_storage_settings()
+        return True
+    except RuntimeError:
+        return False
+
+
+class SupabaseStorageError(RuntimeError):
+    pass
+
+
+def supabase_storage_request(method, path, body=None, content_type=None, allow_statuses=()):
+    base_url, service_key, _ = supabase_storage_settings()
+    headers = {"apikey": service_key, "Authorization": f"Bearer {service_key}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(
+        f"{base_url}/storage/v1/{path.lstrip('/')}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.read(MAX_IMAGE_BYTES + 1024)
+    except urllib.error.HTTPError as error:
+        if error.code in allow_statuses:
+            return error.code, error.read(4096)
+        raise SupabaseStorageError(
+            f"Private image storage returned HTTP {error.code}."
+        ) from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise SupabaseStorageError("Private image storage could not be reached.") from error
+
+
+def ensure_image_bucket():
+    _, _, bucket = supabase_storage_settings()
+    bucket_path = f"bucket/{urllib.parse.quote(bucket, safe='')}"
+    status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
+    if status == 404:
+        status, _ = supabase_storage_request(
+            "POST",
+            "bucket",
+            json.dumps({
+                "id": bucket,
+                "name": bucket,
+                "public": False,
+                "file_size_limit": MAX_IMAGE_BYTES,
+                "allowed_mime_types": sorted(SUPPORTED_IMAGE_TYPES),
+            }).encode("utf-8"),
+            "application/json",
+            allow_statuses=(400, 409),
+        )
+        if status in {400, 409}:
+            status, _ = supabase_storage_request("GET", bucket_path, allow_statuses=(404,))
+        if status not in {200, 201}:
+            raise SupabaseStorageError("Private image storage bucket could not be created.")
+
+
+def image_storage_path(path):
+    _, _, bucket = supabase_storage_settings()
+    return f"object/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(path, safe='/')}"
+
+
+def delete_storage_object(path):
+    _, _, bucket = supabase_storage_settings()
+    supabase_storage_request(
+        "DELETE",
+        f"object/{urllib.parse.quote(bucket, safe='')}",
+        json.dumps({"prefixes": [path]}).encode("utf-8"),
+        "application/json",
+    )
+
+
+def image_metadata(image):
+    return {
+        "id": image["id"],
+        "fileName": image["file_name"],
+        "contentType": image["content_type"],
+        "fileSize": image["file_size"],
+        "uploadedAt": image["uploaded_at"],
+        "expiresAt": image["expires_at"],
+        "previewUrl": f"/api/images/{image['id']}",
+        "downloadUrl": f"/api/images/{image['id']}/download",
+    }
 
 
 def set_session_cookie(handler, token, max_age=SESSION_TTL_SECONDS):
@@ -333,6 +522,11 @@ def load_local_env():
             GOOGLE_CLIENT_ID_NAME,
             GOOGLE_CLIENT_SECRET_NAME,
             GOOGLE_REDIRECT_URI_NAME,
+            SUPABASE_URL_NAME,
+            SUPABASE_SERVICE_ROLE_KEY_NAME,
+            SUPABASE_STORAGE_BUCKET_NAME,
+            ADMIN_PASSWORD_NAME,
+            CRON_SECRET_NAME,
         } and value:
             if name != API_KEY_NAME or value != "paste-your-groq-api-key-here":
                 os.environ.setdefault(name, value)
@@ -503,6 +697,10 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         request_path = urllib.parse.urlsplit(self.path).path
+        if request_path == "/admin":
+            self.path = "/admin.html"
+            super().do_GET()
+            return
         decoded_path = urllib.parse.unquote(request_path).replace("\\", "/")
         if any(
             part.casefold() == ".env"
@@ -510,6 +708,73 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             for part in decoded_path.split("/")
         ):
             send_json(self, 404, {"error": "Not found."})
+            return
+        if request_path == "/api/admin/session":
+            send_json(
+                self,
+                200,
+                {"configured": len(admin_password()) >= 16, "authenticated": admin_authenticated(self)},
+            )
+            return
+        if request_path == "/api/admin/stats":
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            with database_connection() as connection:
+                stats = connection.execute(
+                    "SELECT (SELECT COUNT(*) FROM users) AS users, "
+                    "(SELECT COUNT(*) FROM users WHERE is_disabled = FALSE) AS active_users, "
+                    "(SELECT COUNT(*) FROM users WHERE is_disabled = TRUE) AS disabled_users, "
+                    "(SELECT COUNT(*) FROM study_history) AS study_plans, "
+                    "(SELECT COUNT(*) FROM uploaded_images WHERE expires_at > ?) AS images",
+                    (int(time.time()),),
+                ).fetchone()
+            send_json(self, 200, {"stats": stats})
+            return
+        if request_path == "/api/admin/users":
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            with database_connection() as connection:
+                users = connection.execute(
+                    "SELECT users.id, users.email, users.created_at, users.auth_provider, users.is_disabled, "
+                    "COUNT(uploaded_images.id) AS image_count FROM users "
+                    "LEFT JOIN uploaded_images ON uploaded_images.user_id = users.id "
+                    "GROUP BY users.id ORDER BY users.created_at DESC, users.id DESC LIMIT 500"
+                ).fetchall()
+            send_json(self, 200, {"users": users})
+            return
+        if request_path == "/api/admin/images":
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            with database_connection() as connection:
+                images = connection.execute(
+                    "SELECT uploaded_images.id, uploaded_images.user_id, users.email, uploaded_images.plan_id, "
+                    "uploaded_images.file_name, uploaded_images.content_type, uploaded_images.file_size, "
+                    "uploaded_images.uploaded_at, uploaded_images.expires_at FROM uploaded_images "
+                    "JOIN users ON users.id = uploaded_images.user_id "
+                    "ORDER BY uploaded_images.uploaded_at DESC, uploaded_images.id DESC LIMIT 500"
+                ).fetchall()
+            send_json(self, 200, {"images": [dict(image, previewUrl=f"/api/admin/images/{image['id']}/preview", downloadUrl=f"/api/admin/images/{image['id']}/download") for image in images]})
+            return
+        admin_image_match = re.fullmatch(r"/api/admin/images/(\d+)/(preview|download)", request_path)
+        if admin_image_match:
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            self.serve_stored_image(int(admin_image_match.group(1)), is_admin=True, download=admin_image_match.group(2) == "download")
+            return
+        user_image_match = re.fullmatch(r"/api/images/(\d+)(?:/(download))?", request_path)
+        if user_image_match:
+            user = authenticated_user(self)
+            if not user:
+                send_json(self, 401, {"error": "Sign in to view this image."})
+                return
+            self.serve_stored_image(int(user_image_match.group(1)), user=user, download=bool(user_image_match.group(2)))
+            return
+        if request_path == "/api/cron/cleanup-images":
+            self.cleanup_expired_images()
             return
         if request_path == "/api/auth/google/start":
             self.start_google_auth()
@@ -525,7 +790,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "SELECT EXISTS(SELECT 1 FROM users) AS has_accounts, users.id AS user_id, users.email, "
                     "study_progress.progress_json FROM (SELECT 1) AS singleton "
                     "LEFT JOIN login_sessions ON login_sessions.token_hash = ? AND login_sessions.expires_at > ? "
-                    "LEFT JOIN users ON users.id = login_sessions.user_id "
+                    "LEFT JOIN users ON users.id = login_sessions.user_id AND users.is_disabled = FALSE "
                     "LEFT JOIN study_progress ON study_progress.user_id = users.id",
                     (token_hash, int(time.time())),
                 ).fetchone()
@@ -552,22 +817,35 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             if not user:
                 send_json(self, 401, {"error": "Sign in to view your study history."})
                 return
+            now = int(time.time())
             with database_connection() as connection:
                 rows = connection.execute(
                     "SELECT id, progress_json, created_at FROM study_history WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 50",
                     (user["id"],),
                 ).fetchall()
-            items = []
-            for row in rows:
-                try:
-                    progress = json.loads(row["progress_json"])
-                except json.JSONDecodeError:
-                    continue
-                topics = progress.get("topics") if isinstance(progress.get("topics"), list) else []
-                first_title = topics[0].get("title") if topics and isinstance(topics[0], dict) else ""
-                material = progress.get("material") if isinstance(progress.get("material"), str) else ""
-                title = first_title or next((line.strip() for line in material.splitlines() if line.strip()), "Study plan")
-                items.append({"id": row["id"], "title": title[:100], "createdAt": row["created_at"]})
+                items = []
+                for row in rows:
+                    try:
+                        progress = json.loads(row["progress_json"])
+                    except json.JSONDecodeError:
+                        continue
+                    topics = progress.get("topics") if isinstance(progress.get("topics"), list) else []
+                    first_title = topics[0].get("title") if topics and isinstance(topics[0], dict) else ""
+                    material = progress.get("material") if isinstance(progress.get("material"), str) else ""
+                    title = first_title or next((line.strip() for line in material.splitlines() if line.strip()), "Study plan")
+                    plan_id = progress.get("planId")
+                    image = connection.execute(
+                        "SELECT id, file_name, content_type, file_size, uploaded_at, expires_at "
+                        "FROM uploaded_images WHERE user_id = ? AND plan_id = ? AND expires_at > ? "
+                        "ORDER BY uploaded_at DESC LIMIT 1",
+                        (user["id"], plan_id, now),
+                    ).fetchone() if isinstance(plan_id, str) else None
+                    items.append({
+                        "id": row["id"],
+                        "title": title[:100],
+                        "createdAt": row["created_at"],
+                        "image": image_metadata(image) if image else None,
+                    })
             send_json(self, 200, {"items": items})
             return
         history_match = re.fullmatch(r"/api/history/(\d+)", request_path)
@@ -599,6 +877,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     "visionAvailable": configured,
                     "aiAvailable": configured,
                     "aiConfigured": configured,
+                    "imageStorageAvailable": image_storage_configured(),
                 },
             )
             return
@@ -618,6 +897,216 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("The request data is invalid.")
         return payload
+
+    def admin_login(self):
+        password = admin_password()
+        if len(password) < 16:
+            send_json(self, 503, {"error": "Admin access is not configured. Set STUDYBUDDY_ADMIN_PASSWORD to a secret of at least 16 characters."})
+            return
+        try:
+            payload = self.read_json_body(4096)
+            submitted_password = payload.get("password", "")
+            if not isinstance(submitted_password, str) or len(submitted_password) > 1024:
+                raise ValueError("Enter the admin password.")
+            forwarded_ip = self.headers.get("X-Forwarded-For", "").rsplit(",", 1)[-1].strip()
+            remote_ip = forwarded_ip or (self.client_address[0] if self.client_address else "")
+            ip_hash = hmac.new(password.encode("utf-8"), remote_ip.encode("utf-8"), hashlib.sha256).hexdigest()
+            now = int(time.time())
+            with database_connection() as connection:
+                attempt = connection.execute(
+                    "SELECT window_started_at, failed_count, locked_until FROM admin_login_attempts WHERE ip_hash = ?",
+                    (ip_hash,),
+                ).fetchone()
+                if attempt and attempt["locked_until"] > now:
+                    send_json(self, 429, {"error": "Too many admin sign-in attempts. Try again later."})
+                    return
+                if attempt and now - attempt["window_started_at"] < ADMIN_LOGIN_WINDOW_SECONDS:
+                    failed_count = attempt["failed_count"]
+                    window_started_at = attempt["window_started_at"]
+                else:
+                    failed_count = 0
+                    window_started_at = now
+                if not hmac.compare_digest(submitted_password, password):
+                    failed_count += 1
+                    locked_until = now + ADMIN_LOGIN_WINDOW_SECONDS if failed_count >= ADMIN_LOGIN_MAX_ATTEMPTS else 0
+                    connection.execute(
+                        "INSERT INTO admin_login_attempts(ip_hash, window_started_at, failed_count, locked_until) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(ip_hash) DO UPDATE SET "
+                        "window_started_at=excluded.window_started_at, failed_count=excluded.failed_count, "
+                        "locked_until=excluded.locked_until",
+                        (ip_hash, window_started_at, failed_count, locked_until),
+                    )
+                    send_json(
+                        self,
+                        429 if locked_until else 401,
+                        {"error": "Incorrect admin password. Try again." if not locked_until else "Too many admin sign-in attempts. Try again later."},
+                    )
+                    return
+                connection.execute("DELETE FROM admin_login_attempts WHERE ip_hash = ?", (ip_hash,))
+            send_json(
+                self,
+                200,
+                {"ok": True},
+                {"Set-Cookie": admin_cookie_value(self, admin_session_token(password))},
+            )
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Admin sign-in could not connect to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def upload_study_image(self):
+        user = authenticated_user(self)
+        if not user:
+            send_json(self, 401, {"error": "Sign in to save images to your study history."})
+            return
+        try:
+            payload = self.read_json_body(MAX_REQUEST_BYTES)
+            data_url = payload.get("image", "")
+            match = re.fullmatch(
+                r"data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})",
+                data_url,
+            )
+            if not match:
+                raise ValueError("Choose a supported image file.")
+            content_type, encoded = match.groups()
+            if content_type not in SUPPORTED_IMAGE_TYPES:
+                raise ValueError("Choose a PNG, JPEG, WebP, or GIF image.")
+            image_bytes = base64.b64decode(encoded, validate=True)
+            if not image_bytes or len(image_bytes) > MAX_IMAGE_BYTES:
+                raise ValueError("Choose an image under 10 MB.")
+            raw_name = payload.get("fileName", "study-image")
+            if not isinstance(raw_name, str) or len(raw_name) > 512:
+                raise ValueError("The image file name is invalid.")
+            file_name = re.split(r"[\\/]", raw_name)[-1]
+            file_name = re.sub(r"[^A-Za-z0-9._ -]", "_", file_name).strip(" .")[:120] or "study-image"
+            extension = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+            }[content_type]
+            if not file_name.casefold().endswith(extension):
+                file_name = f"{file_name}{extension}"
+            ensure_image_bucket()
+            storage_path = f"{user['id']}/{secrets.token_urlsafe(24)}{extension}"
+            supabase_storage_request(
+                "POST",
+                image_storage_path(storage_path),
+                image_bytes,
+                content_type,
+            )
+            now = int(time.time())
+            try:
+                with database_connection() as connection:
+                    image = connection.execute(
+                        "INSERT INTO uploaded_images(user_id, storage_path, file_name, content_type, file_size, uploaded_at, expires_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, file_name, content_type, file_size, uploaded_at, expires_at",
+                        (user["id"], storage_path, file_name, content_type, len(image_bytes), now, now + IMAGE_RETENTION_SECONDS),
+                    ).fetchone()
+            except Exception:
+                try:
+                    delete_storage_object(storage_path)
+                except SupabaseStorageError as cleanup_error:
+                    print(f"An unindexed uploaded image could not be removed from storage: {cleanup_error}", file=sys.stderr)
+                raise
+            send_json(self, 201, {"image": image_metadata(image)})
+        except ValueError as error:
+            send_json(self, 400, {"error": str(error)})
+        except SupabaseStorageError as error:
+            print(f"Study image storage failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The image could not be saved to private storage. Please try again shortly."})
+        except RuntimeError as error:
+            send_json(self, 503, {"error": str(error)})
+        except Exception as error:
+            if is_database_connection_error(error):
+                print("Study image metadata could not be saved to the database.", file=sys.stderr)
+                send_json(self, 503, {"error": "StudyBuddy can't reach its database right now. Please try again shortly."})
+            else:
+                raise
+
+    def serve_stored_image(self, image_id, user=None, is_admin=False, download=False):
+        with database_connection() as connection:
+            if is_admin:
+                image = connection.execute(
+                    "SELECT id, user_id, storage_path, file_name, content_type, file_size, expires_at "
+                    "FROM uploaded_images WHERE id = ?",
+                    (image_id,),
+                ).fetchone()
+            else:
+                image = connection.execute(
+                    "SELECT id, user_id, storage_path, file_name, content_type, file_size, expires_at "
+                    "FROM uploaded_images WHERE id = ? AND user_id = ?",
+                    (image_id, user["id"]),
+                ).fetchone()
+        if not image:
+            send_json(self, 404, {"error": "That image could not be found."})
+            return
+        if image["expires_at"] <= int(time.time()):
+            send_json(self, 410, {"error": "This image has expired and is no longer available."})
+            return
+        try:
+            _, body = supabase_storage_request("GET", image_storage_path(image["storage_path"]))
+        except (RuntimeError, SupabaseStorageError) as error:
+            print(f"Study image download failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The image could not be downloaded right now. Please try again shortly."})
+            return
+        disposition = "attachment" if download else "inline"
+        safe_name = urllib.parse.quote(image["file_name"], safe="")
+        self.send_response(200)
+        self.send_header("Content-Type", image["content_type"])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{safe_name}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "private, no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def delete_stored_image(self, image_id):
+        with database_connection() as connection:
+            image = connection.execute(
+                "SELECT id, storage_path FROM uploaded_images WHERE id = ?", (image_id,)
+            ).fetchone()
+        if not image:
+            send_json(self, 404, {"error": "That image could not be found."})
+            return
+        try:
+            delete_storage_object(image["storage_path"])
+        except (RuntimeError, SupabaseStorageError) as error:
+            print(f"Study image deletion failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The image could not be removed from storage. Please try again."})
+            return
+        with database_connection() as connection:
+            connection.execute("DELETE FROM uploaded_images WHERE id = ?", (image_id,))
+        send_json(self, 200, {"ok": True})
+
+    def cleanup_expired_images(self):
+        secret = os.environ.get(CRON_SECRET_NAME, "")
+        supplied = self.headers.get("Authorization", "")
+        if not secret or not hmac.compare_digest(supplied, f"Bearer {secret}"):
+            send_json(self, 403, {"error": "Not authorized."})
+            return
+        now = int(time.time())
+        with database_connection() as connection:
+            expired = connection.execute(
+                "SELECT id, storage_path FROM uploaded_images WHERE expires_at <= ? ORDER BY expires_at LIMIT 100",
+                (now,),
+            ).fetchall()
+        removed = 0
+        try:
+            for image in expired:
+                delete_storage_object(image["storage_path"])
+                with database_connection() as connection:
+                    connection.execute("DELETE FROM uploaded_images WHERE id = ?", (image["id"],))
+                removed += 1
+        except (RuntimeError, SupabaseStorageError) as error:
+            print(f"Expired image cleanup failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "Expired images could not be cleaned up. The scheduled job will retry."})
+            return
+        send_json(self, 200, {"ok": True, "removed": removed})
 
     def session_cookie_value(self, token, max_age=SESSION_TTL_SECONDS):
         secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https" else ""
@@ -695,11 +1184,14 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             now = int(time.time())
             token = secrets.token_urlsafe(32)
             email_in_use = False
+            account_disabled = False
             with database_connection() as connection:
                 user = connection.execute(
-                    "SELECT id, auth_provider FROM users WHERE email = ?", (email,)
+                    "SELECT id, auth_provider, is_disabled FROM users WHERE email = ?", (email,)
                 ).fetchone()
-                if user and user["auth_provider"] == "password":
+                if user and user["is_disabled"]:
+                    account_disabled = True
+                elif user and user["auth_provider"] == "password":
                     email_in_use = True
                 elif not user:
                     cursor = connection.execute(
@@ -712,9 +1204,11 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                         user_id = inserted_user["id"]
                     else:
                         user = connection.execute(
-                            "SELECT id, auth_provider FROM users WHERE email = ?", (email,)
+                            "SELECT id, auth_provider, is_disabled FROM users WHERE email = ?", (email,)
                         ).fetchone()
-                        if user and user["auth_provider"] == "password":
+                        if user and user["is_disabled"]:
+                            account_disabled = True
+                        elif user and user["auth_provider"] == "password":
                             email_in_use = True
                         elif user:
                             user_id = user["id"]
@@ -722,13 +1216,16 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                             raise RuntimeError("The Google account could not be created.")
                 else:
                     user_id = user["id"]
-                if not email_in_use:
+                if not email_in_use and not account_disabled:
                     connection.execute(
                         "INSERT INTO login_sessions(token_hash, user_id, expires_at) VALUES (?, ?, ?)",
                         (hashlib.sha256(token.encode()).hexdigest(), user_id, now + SESSION_TTL_SECONDS),
                     )
             if email_in_use:
                 send_redirect(self, "/?auth_error=google_email_in_use", (clear_cookie,))
+                return
+            if account_disabled:
+                send_redirect(self, "/?auth_error=account_disabled", (clear_cookie,))
                 return
             send_redirect(
                 self,
@@ -748,9 +1245,14 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             if not isinstance(password, str) or len(password) > 256:
                 raise ValueError("Enter your email and password.")
             with database_connection() as connection:
-                user = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+                user = connection.execute(
+                    "SELECT id, email, password_hash, is_disabled FROM users WHERE email = ?", (email,)
+                ).fetchone()
                 if not user:
                     send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
+                    return
+                if user["is_disabled"]:
+                    send_json(self, 403, {"error": "This account has been disabled. Contact StudyBuddy support."})
                     return
                 if not verify_password(password, user["password_hash"]):
                     send_json(self, 401, {"error": "Incorrect password. Please enter the correct password and try again."})
@@ -836,11 +1338,38 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             progress_json = json.dumps(progress, separators=(",", ":"))
             if len(progress_json.encode("utf-8")) > MAX_PROGRESS_BYTES:
                 raise ValueError("This study plan is too large to save.")
+            image_id = progress.get("imageId")
+            if image_id is not None and (
+                not isinstance(image_id, int)
+                or isinstance(image_id, bool)
+                or image_id <= 0
+                or not isinstance(progress.get("planId"), str)
+                or not progress["planId"].strip()
+            ):
+                raise ValueError("The study image reference is invalid.")
             now = int(time.time())
             saved_at = progress.get("savedAt")
             if not isinstance(saved_at, int) or saved_at < 0:
                 saved_at = int(time.time() * 1000)
             with database_connection() as connection:
+                if image_id is not None:
+                    image = connection.execute(
+                        "SELECT user_id, plan_id, expires_at FROM uploaded_images WHERE id = ?",
+                        (image_id,),
+                    ).fetchone()
+                    if image and image["user_id"] != user["id"]:
+                        raise ValueError("That image does not belong to this account.")
+                    if image and image["expires_at"] > now:
+                        if image["plan_id"] not in (None, progress["planId"]):
+                            raise ValueError("That image is already linked to another study plan.")
+                        connection.execute(
+                            "UPDATE uploaded_images SET plan_id = ? WHERE id = ? AND user_id = ?",
+                            (progress["planId"], image_id, user["id"]),
+                        )
+                    else:
+                        progress["imageId"] = None
+                        image_id = None
+                        progress_json = json.dumps(progress, separators=(",", ":"))
                 previous = connection.execute(
                     "SELECT progress_json, updated_at FROM study_progress WHERE user_id = ?",
                     (user["id"],),
@@ -888,8 +1417,65 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
         except ValueError as error:
             send_json(self, 400, {"error": str(error)})
 
+    def manage_admin_user(self, user_id, action):
+        if not admin_authenticated(self):
+            send_json(self, 401, {"error": "Admin sign-in is required."})
+            return
+        if action == "delete":
+            with database_connection() as connection:
+                images = connection.execute(
+                    "SELECT storage_path FROM uploaded_images WHERE user_id = ?", (user_id,)
+                ).fetchall()
+                exists = connection.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not exists:
+                send_json(self, 404, {"error": "That user account could not be found."})
+                return
+            try:
+                for image in images:
+                    delete_storage_object(image["storage_path"])
+            except (RuntimeError, SupabaseStorageError) as error:
+                print(f"User image cleanup before account deletion failed: {error}", file=sys.stderr)
+                send_json(self, 503, {"error": "The user's stored images could not be removed. The account was not deleted."})
+                return
+            with database_connection() as connection:
+                connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            send_json(self, 200, {"ok": True})
+            return
+        disabled = action == "disable"
+        with database_connection() as connection:
+            result = connection.execute(
+                "UPDATE users SET is_disabled = ? WHERE id = ? RETURNING id",
+                (disabled, user_id),
+            ).fetchone()
+            if disabled and result:
+                connection.execute("DELETE FROM login_sessions WHERE user_id = ?", (user_id,))
+        if not result:
+            send_json(self, 404, {"error": "That user account could not be found."})
+            return
+        send_json(self, 200, {"ok": True, "disabled": disabled})
+
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        admin_user_action = re.fullmatch(r"/api/admin/users/(\d+)/(disable|enable)", path)
+        if path.startswith("/api/admin/"):
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+                return
+            if path == "/api/admin/login":
+                self.admin_login()
+            elif path == "/api/admin/logout":
+                send_json(self, 200, {"ok": True}, {"Set-Cookie": admin_cookie_value(self, "", 0)})
+            elif admin_user_action:
+                self.manage_admin_user(int(admin_user_action.group(1)), admin_user_action.group(2))
+            else:
+                send_json(self, 404, {"error": "Endpoint not found."})
+            return
+        if path == "/api/images":
+            if not origin_is_same_site(self):
+                send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            else:
+                self.upload_study_image()
+            return
         if path in {
             "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/progress",
         }:
@@ -1485,6 +2071,23 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             send_json(self, status, {"error": message})
             return
         send_json(self, 200, {"explanation": explanation})
+
+    def do_DELETE(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if not origin_is_same_site(self):
+            send_json(self, 403, {"error": "This request must come from the StudyBuddy site."})
+            return
+        image_match = re.fullmatch(r"/api/admin/images/(\d+)", path)
+        user_match = re.fullmatch(r"/api/admin/users/(\d+)", path)
+        if image_match:
+            if not admin_authenticated(self):
+                send_json(self, 401, {"error": "Admin sign-in is required."})
+                return
+            self.delete_stored_image(int(image_match.group(1)))
+        elif user_match:
+            self.manage_admin_user(int(user_match.group(1)), "delete")
+        else:
+            send_json(self, 404, {"error": "Endpoint not found."})
 
 
 # Vercel's Python runtime looks for a top-level handler class.

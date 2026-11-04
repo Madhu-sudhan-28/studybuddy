@@ -1,0 +1,58 @@
+:root {
+  color: #233a32;
+  background: #f7f7f2;
+  font-family: "DM Sans", "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+.topbar { height: 68px; padding: 0 max(22px, calc((100% - 1180px) / 2)); display: flex; align-items: center; justify-content: space-between; background: #fffefa; border-bottom: 1px solid #e9ebe4; }
+.brand { display: flex; align-items: center; gap: 10px; font: 800 20px "Segoe UI", sans-serif; letter-spacing: -.7px; color: #233a32; text-decoration: none; }
+.brand img { width: 35px; height: 35px; border-radius: 9px; }
+.accent { color: #72956d; }
+.brand small { margin-left: 5px; color: #89958a; font: 700 10px "Segoe UI", sans-serif; letter-spacing: 1px; }
+main { width: min(1180px, calc(100% - 40px)); margin: 38px auto 60px; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 8px; font-size: clamp(25px, 4vw, 36px); letter-spacing: -1px; }
+h2 { margin: 0; font-size: 21px; }
+.eyebrow { margin-bottom: 7px; color: #8a998e; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; }
+.panel { background: #fffefa; border: 1px solid #e8ebe4; border-radius: 12px; box-shadow: 0 8px 26px #233a3208; }
+.login-panel { width: min(430px, 100%); margin: 10vh auto; padding: 28px; }
+.login-panel > p { color: #738178; line-height: 1.55; }
+form label { display: block; margin: 20px 0 8px; font-size: 13px; font-weight: 700; }
+form input { width: 100%; height: 46px; padding: 0 12px; border: 1px solid #dfe5dc; border-radius: 7px; font: inherit; }
+form input:focus { outline: 3px solid #94b9a155; border-color: #78987c; }
+.button { min-height: 38px; padding: 0 15px; border: 0; border-radius: 7px; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.button:disabled { opacity: .6; cursor: wait; }
+.primary { width: 100%; color: white; background: #235842; }
+.secondary { color: #285b43; background: #eaf0e9; }
+.error { min-height: 18px; margin: 12px 0; color: #a33d32; font-size: 13px; }
+.loading { text-align: center; color: #718078; }
+.page-heading, .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.page-heading { margin-bottom: 24px; }
+.stats-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 20px 0 28px; }
+.stat { min-height: 94px; padding: 18px; display: flex; flex-direction: column; justify-content: space-between; color: #728078; font-size: 12px; }
+.stat strong { color: #233a32; font-size: 27px; }
+.section-panel { margin-top: 18px; padding: 22px; }
+.section-heading { margin-bottom: 18px; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+.image-card { min-width: 0; overflow: hidden; border: 1px solid #e8ebe4; border-radius: 9px; background: white; }
+.image-card img { width: 100%; height: 160px; display: block; object-fit: cover; background: #f2f4ef; }
+.image-card-body { padding: 12px; }
+.image-card-body strong, .image-card-body small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-card-body small { margin-top: 5px; color: #758279; font-size: 11px; }
+.image-actions { display: flex; gap: 8px; margin-top: 12px; }
+.image-actions a, .image-actions button { min-height: 32px; padding: 7px 10px; border: 0; border-radius: 6px; background: #eaf0e9; color: #285b43; font: 700 12px "Segoe UI", sans-serif; text-decoration: none; cursor: pointer; }
+.image-actions button { background: #f9eae7; color: #a33d32; }
+.empty { padding: 18px 0; color: #78857c; font-size: 13px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+th, td { padding: 11px 9px; border-bottom: 1px solid #eceee8; white-space: nowrap; }
+th { color: #7b887e; font-size: 10px; letter-spacing: .7px; text-transform: uppercase; }
+td.actions { display: flex; gap: 6px; }
+td .button { min-height: 30px; padding: 0 9px; font-size: 11px; }
+td .danger { color: #a33d32; background: #f9eae7; }
+footer { padding: 20px; color: #929b92; font-size: 11px; text-align: center; }
+@media (max-width: 750px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stats-grid .stat:last-child { grid-column: span 2; } main { margin-top: 24px; } .section-panel { padding: 16px; } }
