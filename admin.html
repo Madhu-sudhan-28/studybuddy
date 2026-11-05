@@ -69,6 +69,16 @@
           <div id="user-history-content"></div>
         </section>
       </section>
+      <dialog id="image-preview-dialog" class="image-preview-dialog" aria-labelledby="image-preview-title">
+        <div class="image-preview-heading">
+          <div>
+            <h2 id="image-preview-title">Uploaded image</h2>
+            <p id="image-preview-error" class="error" role="alert" hidden>The image could not be loaded. Close the preview and try again.</p>
+          </div>
+          <form method="dialog"><button class="button secondary" type="submit">Close</button></form>
+        </div>
+        <img id="image-preview" alt="" />
+      </dialog>
       <p id="admin-loading" class="loading">Loading admin access…</p>
     </main>
     <footer>StudyBuddy admin tools. Keep this page and its password private.</footer>

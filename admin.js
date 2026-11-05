@@ -15,6 +15,10 @@ const userHistoryPanel = document.querySelector("#user-history-panel");
 const userHistoryTitle = document.querySelector("#user-history-title");
 const userHistoryContent = document.querySelector("#user-history-content");
 const userHistoryError = document.querySelector("#user-history-error");
+const imagePreviewDialog = document.querySelector("#image-preview-dialog");
+const imagePreview = document.querySelector("#image-preview");
+const imagePreviewTitle = document.querySelector("#image-preview-title");
+const imagePreviewError = document.querySelector("#image-preview-error");
 const userHistoryCache = new Map();
 const userHistoryFiles = new Map();
 const adminRefreshButton = document.querySelector("#admin-refresh");
@@ -63,13 +67,14 @@ function renderImages(images) {
   imagesContainer.innerHTML = images.length ? images.map((image) => `
     <article class="image-card">
       ${isImageFile(image)
-        ? `<img src="${escapeHtml(image.previewUrl)}" alt="Uploaded study image" loading="lazy" />`
+        ? `<button class="image-preview-button" type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}" aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
         : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>${escapeHtml(image.email)}</small>
         <small>${sizeText(image.file_size)} · expires ${dateText(image.expires_at)}</small>
         <div class="image-actions">
+          ${isImageFile(image) ? `<button type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}">Preview</button>` : ""}
           <a href="${escapeHtml(image.downloadUrl)}">Download file</a>
           <button type="button" data-delete-image="${Number(image.id)}">Delete</button>
         </div>
@@ -127,12 +132,15 @@ function renderHistoryImages(images) {
   return images.length ? `<div class="image-grid">${images.map((image) => `
     <article class="image-card">
       ${isImageFile(image)
-        ? `<img src="${escapeHtml(image.previewUrl)}" alt="Image uploaded by this user" loading="lazy" />`
+        ? `<button class="image-preview-button" type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}" aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
         : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>${sizeText(image.file_size)} · uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
-        <div class="image-actions"><a href="${escapeHtml(image.downloadUrl)}">Download file</a></div>
+        <div class="image-actions">
+          ${isImageFile(image) ? `<button type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}">Preview</button>` : ""}
+          <a href="${escapeHtml(image.downloadUrl)}">Download file</a>
+        </div>
       </div>
     </article>`).join("")}</div>` : '<p class="empty">No retained files.</p>';
 }
@@ -152,7 +160,7 @@ function renderUserHistory(result) {
         <div class="history-record-actions">
           <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
           ${images.some(isImageFile)
-            ? `<a class="plan-image-thumbnail" href="${escapeHtml(images.find(isImageFile).previewUrl)}" target="_blank" rel="noopener" aria-label="Open plan image"><img src="${escapeHtml(images.find(isImageFile).previewUrl)}" alt="Image uploaded for ${escapeHtml(item.title)}" loading="lazy" /></a>`
+            ? `<button class="plan-image-thumbnail" type="button" data-preview-image="${escapeHtml(images.find(isImageFile).previewUrl)}" data-preview-name="${escapeHtml(images.find(isImageFile).file_name)}" aria-label="Preview image uploaded for ${escapeHtml(item.title)}"><img src="${escapeHtml(images.find(isImageFile).previewUrl)}" alt="" loading="lazy" /></button>`
             : images.length
               ? `<span class="plan-image-file" aria-label="Plan has uploaded files">${images.length} file${images.length === 1 ? "" : "s"}</span>`
               : '<span class="plan-image-missing">No saved files</span>'}
@@ -177,6 +185,14 @@ function renderUserHistory(result) {
       button,
     ));
   });
+}
+
+function openImagePreview(button) {
+  imagePreviewTitle.textContent = button.dataset.previewName || "Uploaded image";
+  imagePreviewError.hidden = true;
+  imagePreview.hidden = false;
+  imagePreview.src = button.dataset.previewImage;
+  imagePreviewDialog.showModal();
 }
 
 async function loadUserHistory(userId, scrollToPanel = true) {
@@ -319,6 +335,17 @@ document.querySelector("#close-user-history").addEventListener("click", () => {
   userHistoryCache.clear();
   userHistoryFiles.clear();
   selectedUserId = null;
+});
+dashboard.addEventListener("click", (event) => {
+  const previewButton = event.target.closest("[data-preview-image]");
+  if (previewButton) openImagePreview(previewButton);
+});
+imagePreview.addEventListener("error", () => {
+  imagePreview.hidden = true;
+  imagePreviewError.hidden = false;
+});
+imagePreviewDialog.addEventListener("close", () => {
+  imagePreview.removeAttribute("src");
 });
 
 api("/api/admin/session")
