@@ -507,7 +507,6 @@ function setAuthMode(mode = "login", preserveFields = false) {
   document.querySelector("#auth-switch").hidden = !credentialsMode;
   document.querySelector("#auth-switch-prompt").textContent = registering ? "Already have an account?" : "New to StudyBuddy?";
   document.querySelector("#auth-toggle").textContent = registering ? "Sign in" : "Create an account";
-  document.querySelector("#auth-forgot-password").hidden = mode !== "login";
   document.querySelector("#auth-resend-code").hidden = !(verifyingEmail || resettingPassword);
   document.querySelector("#auth-back-to-login").hidden = credentialsMode;
   document.querySelector("#auth-code-field").hidden = !usesCode;
@@ -2819,9 +2818,6 @@ authForm.querySelectorAll("[data-password-toggle]").forEach((toggle) => {
 
 document.querySelector("#auth-toggle").addEventListener("click", () => {
   setAuthMode(authMode === "login" ? "register" : "login");
-});
-document.querySelector("#auth-forgot-password").addEventListener("click", () => {
-  setAuthMode("forgot-password", true);
 });
 document.querySelector("#auth-back-to-login").addEventListener("click", () => {
   setAuthMode("login", true);
