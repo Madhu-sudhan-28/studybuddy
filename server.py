@@ -69,6 +69,8 @@ GOOGLE_CLIENT_SECRET_NAME = "GOOGLE_CLIENT_SECRET"
 GOOGLE_REDIRECT_URI_NAME = "GOOGLE_REDIRECT_URI"
 RESEND_API_KEY_NAME = "RESEND_API_KEY"
 RESEND_FROM_EMAIL_NAME = "RESEND_FROM_EMAIL"
+BREVO_API_KEY_NAME = "BREVO_API_KEY"
+BREVO_FROM_EMAIL_NAME = "BREVO_FROM_EMAIL"
 AUTH_COOKIE = "studybuddy_session"
 ADMIN_COOKIE = "studybuddy_admin"
 GOOGLE_OAUTH_COOKIE = "studybuddy_google_oauth"
@@ -254,14 +256,24 @@ class EmailCodeRateLimitError(RuntimeError):
     pass
 
 
-def resend_email_settings():
-    api_key = os.environ.get(RESEND_API_KEY_NAME, "").strip()
-    from_email = os.environ.get(RESEND_FROM_EMAIL_NAME, "").strip()
-    if not api_key or not from_email:
+def auth_email_settings():
+    brevo_api_key = os.environ.get(BREVO_API_KEY_NAME, "").strip()
+    brevo_from_email = os.environ.get(BREVO_FROM_EMAIL_NAME, "").strip()
+    if brevo_api_key:
+        if not brevo_from_email:
+            raise EmailDeliveryError(
+                "Email verification is not configured. Set BREVO_FROM_EMAIL to a verified Brevo sender."
+            )
+        return "brevo", brevo_api_key, brevo_from_email
+
+    resend_api_key = os.environ.get(RESEND_API_KEY_NAME, "").strip()
+    resend_from_email = os.environ.get(RESEND_FROM_EMAIL_NAME, "").strip()
+    if not resend_api_key or not resend_from_email:
         raise EmailDeliveryError(
-            "Email verification is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL in the server environment."
+            "Email verification is not configured. Set BREVO_API_KEY and BREVO_FROM_EMAIL "
+            "(or RESEND_API_KEY and RESEND_FROM_EMAIL) in the server environment."
         )
-    return api_key, from_email
+    return "resend", resend_api_key, resend_from_email
 
 
 def email_code_digest(email, purpose, code, api_key):
@@ -270,7 +282,7 @@ def email_code_digest(email, purpose, code, api_key):
 
 
 def send_auth_email_code(email, purpose):
-    api_key, from_email = resend_email_settings()
+    provider, api_key, from_email = auth_email_settings()
     now = int(time.time())
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = email_code_digest(email, purpose, code, api_key)
@@ -302,9 +314,7 @@ def send_auth_email_code(email, purpose):
         f"Your StudyBuddy code is {code}. Use it to {purpose_text}. "
         "It expires in 15 minutes. If you did not request this, you can ignore this email."
     )
-    payload = json.dumps({
-        "from": from_email,
-        "to": [email],
+    payload = {
         "subject": subject,
         "text": text,
         "html": (
@@ -314,14 +324,24 @@ def send_auth_email_code(email, purpose):
             "<p>This code expires in 15 minutes. If you did not request it, ignore this email.</p>"
             "</div>"
         ),
-    }).encode("utf-8")
+    }
+    if provider == "brevo":
+        payload.update({
+            "sender": {"email": from_email},
+            "to": [{"email": email}],
+            "textContent": payload.pop("text"),
+            "htmlContent": payload.pop("html"),
+        })
+        endpoint = "https://api.brevo.com/v3/smtp/email"
+        authorization = {"api-key": api_key}
+    else:
+        payload.update({"from": from_email, "to": [email]})
+        endpoint = "https://api.resend.com/emails"
+        authorization = {"Authorization": f"Bearer {api_key}"}
     request = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={**authorization, "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -334,7 +354,7 @@ def send_auth_email_code(email, purpose):
                 "DELETE FROM auth_email_codes WHERE email = ? AND purpose = ? AND code_hash = ?",
                 (email, purpose, code_hash),
             )
-        print(f"Resend rejected an authentication email (HTTP {error.code}).", file=sys.stderr)
+        print(f"{provider.capitalize()} rejected an authentication email (HTTP {error.code}).", file=sys.stderr)
         raise EmailDeliveryError("The email provider could not send your code. Please try again.") from error
     except (urllib.error.URLError, TimeoutError) as error:
         with database_connection() as connection:
@@ -342,7 +362,7 @@ def send_auth_email_code(email, purpose):
                 "DELETE FROM auth_email_codes WHERE email = ? AND purpose = ? AND code_hash = ?",
                 (email, purpose, code_hash),
             )
-        print("Resend could not be reached to send an authentication email.", file=sys.stderr)
+        print(f"{provider.capitalize()} could not be reached to send an authentication email.", file=sys.stderr)
         raise EmailDeliveryError("The email provider could not be reached. Please try again.") from error
 
 
@@ -875,6 +895,10 @@ def load_local_env():
             SUPABASE_STORAGE_BUCKET_NAME,
             ADMIN_PASSWORD_NAME,
             CRON_SECRET_NAME,
+            RESEND_API_KEY_NAME,
+            RESEND_FROM_EMAIL_NAME,
+            BREVO_API_KEY_NAME,
+            BREVO_FROM_EMAIL_NAME,
         } and value:
             if name != API_KEY_NAME or value != "paste-your-groq-api-key-here":
                 os.environ.setdefault(name, value)
@@ -2022,7 +2046,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter a valid email address.")
             validate_account_password(password)
-            resend_email_settings()
+            auth_email_settings()
             now = int(time.time())
             with database_connection() as connection:
                 cursor = connection.execute(
@@ -2062,7 +2086,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             code = payload.get("code", "")
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter the email address used to create your account.")
-            api_key, _ = resend_email_settings()
+            _, api_key, _ = auth_email_settings()
             now = int(time.time())
             token = secrets.token_urlsafe(32)
             verified = False
@@ -2107,7 +2131,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter a valid email address.")
-            resend_email_settings()
+            auth_email_settings()
             with database_connection() as connection:
                 user = connection.execute(
                     "SELECT email_verified, is_disabled FROM users "
@@ -2143,7 +2167,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             email = raw_email.strip().casefold() if isinstance(raw_email, str) else ""
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter a valid email address.")
-            resend_email_settings()
+            auth_email_settings()
             with database_connection() as connection:
                 user = connection.execute(
                     "SELECT email_verified, is_disabled FROM users "
@@ -2182,7 +2206,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
                 raise ValueError("Enter the email address used to request the reset code.")
             validate_account_password(password)
-            api_key, _ = resend_email_settings()
+            _, api_key, _ = auth_email_settings()
             reset = False
             with database_connection() as connection:
                 user = connection.execute(
