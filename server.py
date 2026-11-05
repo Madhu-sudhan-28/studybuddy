@@ -743,10 +743,10 @@ def image_metadata(image):
         "uploadedAt": image["uploaded_at"],
         "expiresAt": image["expires_at"],
         "downloadUrl": f"/api/images/{image['id']}/download",
+        "previewUrl": f"/api/images/{image['id']}",
+        "previewTextUrl": f"/api/images/{image['id']}/preview-text",
         "isImage": image["content_type"] in SUPPORTED_IMAGE_TYPES,
     }
-    if metadata["isImage"]:
-        metadata["previewUrl"] = f"/api/images/{image['id']}"
     return metadata
 
 
@@ -1145,8 +1145,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 dict(
                     image,
                     isImage=image["content_type"] in SUPPORTED_IMAGE_TYPES,
-                    previewUrl=f"/api/admin/images/{image['id']}/preview"
-                    if image["content_type"] in SUPPORTED_IMAGE_TYPES else None,
+                    previewUrl=f"/api/admin/images/{image['id']}/preview",
+                    previewTextUrl=f"/api/admin/images/{image['id']}/preview-text",
                     downloadUrl=f"/api/admin/images/{image['id']}/download",
                 )
                 for image in image_rows
@@ -1250,8 +1250,8 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                         dict(
                             image,
                             isImage=image["content_type"] in SUPPORTED_IMAGE_TYPES,
-                            previewUrl=f"/api/admin/images/{image['id']}/preview"
-                            if image["content_type"] in SUPPORTED_IMAGE_TYPES else None,
+                            previewUrl=f"/api/admin/images/{image['id']}/preview",
+                            previewTextUrl=f"/api/admin/images/{image['id']}/preview-text",
                             downloadUrl=f"/api/admin/images/{image['id']}/download",
                         )
                         for image in images
@@ -1259,20 +1259,32 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                 },
             )
             return
-        admin_image_match = re.fullmatch(r"/api/admin/images/(\d+)/(preview|download)", request_path)
+        admin_image_match = re.fullmatch(r"/api/admin/images/(\d+)/(preview-text|preview|download)", request_path)
         if admin_image_match:
             if not admin_authenticated(self):
                 send_json(self, 401, {"error": "Admin sign-in is required."})
                 return
-            self.serve_stored_image(int(admin_image_match.group(1)), is_admin=True, download=admin_image_match.group(2) == "download")
+            action = admin_image_match.group(2)
+            self.serve_stored_file(
+                int(admin_image_match.group(1)),
+                is_admin=True,
+                download=action == "download",
+                preview_text=action == "preview-text",
+            )
             return
-        user_image_match = re.fullmatch(r"/api/images/(\d+)(?:/(download))?", request_path)
+        user_image_match = re.fullmatch(r"/api/images/(\d+)(?:/(preview-text|download))?", request_path)
         if user_image_match:
             user = authenticated_user(self)
             if not user:
-                send_json(self, 401, {"error": "Sign in to view this image."})
+                send_json(self, 401, {"error": "Sign in to view this file."})
                 return
-            self.serve_stored_image(int(user_image_match.group(1)), user=user, download=bool(user_image_match.group(2)))
+            action = user_image_match.group(2)
+            self.serve_stored_file(
+                int(user_image_match.group(1)),
+                user=user,
+                download=action == "download",
+                preview_text=action == "preview-text",
+            )
             return
         if request_path == "/api/cron/cleanup-images":
             self.cleanup_expired_images()
@@ -1794,7 +1806,7 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
             else:
                 raise
 
-    def serve_stored_image(self, image_id, user=None, is_admin=False, download=False):
+    def serve_stored_file(self, image_id, user=None, is_admin=False, download=False, preview_text=False):
         with database_connection() as connection:
             if is_admin:
                 image = connection.execute(
@@ -1809,16 +1821,43 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     (image_id, user["id"]),
                 ).fetchone()
         if not image:
-            send_json(self, 404, {"error": "That image could not be found."})
+            send_json(self, 404, {"error": "That file could not be found."})
             return
         if image["expires_at"] <= int(time.time()):
-            send_json(self, 410, {"error": "This image has expired and is no longer available."})
+            send_json(self, 410, {"error": "This file has expired and is no longer available."})
+            return
+        if preview_text:
+            extension = Path(image["file_name"]).suffix.casefold()
+            try:
+                _, file_bytes = supabase_storage_request(
+                    "GET",
+                    image_storage_path(image["storage_path"]),
+                )
+                if extension in {".pdf", ".docx", ".pptx"}:
+                    text = extract_document_text(file_bytes, image["file_name"])
+                elif image["content_type"].startswith("text/") or image["content_type"] == "application/json":
+                    text = file_bytes.decode("utf-8-sig", errors="replace")
+                else:
+                    send_json(self, 415, {"error": "Preview is not available for this file type. Download the file to open it."})
+                    return
+            except ValueError as error:
+                send_json(self, 422, {"error": str(error)})
+                return
+            except (RuntimeError, SupabaseStorageError) as error:
+                print(f"Study file preview failed: {error}", file=sys.stderr)
+                send_json(self, 503, {"error": "The file preview could not be loaded right now. Please try again shortly."})
+                return
+            send_json(self, 200, {
+                "fileName": image["file_name"],
+                "text": text[:MAX_DOCUMENT_TEXT_CHARS],
+                "truncated": len(text) > MAX_DOCUMENT_TEXT_CHARS,
+            })
             return
         try:
             location = signed_storage_url(image["storage_path"], download=download)
         except (RuntimeError, SupabaseStorageError) as error:
-            print(f"Study image download failed: {error}", file=sys.stderr)
-            send_json(self, 503, {"error": "The image could not be downloaded right now. Please try again shortly."})
+            print(f"Study file access failed: {error}", file=sys.stderr)
+            send_json(self, 503, {"error": "The file could not be opened right now. Please try again shortly."})
             return
         self.send_response(302)
         self.send_header("Location", location)

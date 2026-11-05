@@ -262,5 +262,17 @@
       <p>Lessons and quiz explanations include a related verbatim passage from your notes when a match is found; use it to check the explanation, not as a guarantee that every claim is supported. Study readiness is an estimate based on checked topics, and untested topics lower the estimate. Lesson pages can be read aloud in English by your browser and printed or saved as a PDF. The save indicator shows when progress is saved and offers a retry if saving fails.</p>
       <button class="primary-button dialog-done" id="dialog-done">Got it</button>
     </dialog>
+    <dialog id="file-preview-dialog" class="file-preview-dialog" aria-labelledby="file-preview-title">
+      <div class="file-preview-heading">
+        <h2 id="file-preview-title">Uploaded file</h2>
+        <form method="dialog"><button class="file-preview-close" type="submit">Close</button></form>
+      </div>
+      <p id="file-preview-error" class="file-preview-error" role="alert" hidden></p>
+      <img id="file-preview-image" alt="" hidden />
+      <iframe id="file-preview-frame" title="Uploaded file preview" hidden></iframe>
+      <pre id="file-preview-text" hidden></pre>
+      <p id="file-preview-truncated" class="file-preview-truncated" hidden>Preview is shortened. Download the file to see all of its contents.</p>
+      <a id="file-preview-download" class="file-preview-download" href="#">Download file</a>
+    </dialog>
   </body>
 </html>

@@ -99,6 +99,14 @@ function createPlanId() {
 
 const navLinks = [...document.querySelectorAll("[data-view]")];
 const views = [...document.querySelectorAll(".page-view")];
+const filePreviewDialog = document.querySelector("#file-preview-dialog");
+const filePreviewTitle = document.querySelector("#file-preview-title");
+const filePreviewError = document.querySelector("#file-preview-error");
+const filePreviewImage = document.querySelector("#file-preview-image");
+const filePreviewFrame = document.querySelector("#file-preview-frame");
+const filePreviewText = document.querySelector("#file-preview-text");
+const filePreviewTruncated = document.querySelector("#file-preview-truncated");
+const filePreviewDownload = document.querySelector("#file-preview-download");
 const pageCrumb = document.querySelector("#page-crumb");
 const lessonTitles = {
   home: "My study plan",
@@ -107,6 +115,7 @@ const lessonTitles = {
 };
 let toastTimer;
 let imagePreviewUrl = "";
+let filePreviewRequest = 0;
 let ocrEnginePromise;
 let visionAvailable = false;
 let imageStorageAvailable = false;
@@ -592,10 +601,12 @@ async function loadStudyHistory() {
             </button>
             ${files.length ? `<div class="history-files">${files.map((file) => `
               <div class="history-file">
-                ${file.isImage
-                  ? `<img src="${escapeHtml(file.previewUrl)}" alt="Image saved with this study plan" loading="lazy" />`
-                  : `<span class="history-file-badge">${escapeHtml(file.fileName.split(".").pop().toUpperCase())}</span>`}
-                <div><strong>${escapeHtml(file.fileName)}</strong><a href="${escapeHtml(file.downloadUrl)}">Download file</a></div>
+                <button class="history-file-preview ${file.isImage ? "" : "history-file-badge"}" type="button" ${filePreviewAttributes(file)} aria-label="Preview ${escapeHtml(file.fileName)}">
+                  ${file.isImage
+                    ? `<img src="${escapeHtml(file.previewUrl)}" alt="" loading="lazy" />`
+                    : escapeHtml(file.fileName.split(".").pop().toUpperCase())}
+                </button>
+                <div><strong>${escapeHtml(file.fileName)}</strong><button type="button" ${filePreviewAttributes(file)}>Preview</button></div>
               </div>`).join("")}</div>` : ""}
           </article>`;
       }).join("")
@@ -606,6 +617,55 @@ async function loadStudyHistory() {
   } catch (error) {
     console.error("Could not load study history.", error);
     historyList.innerHTML = '<p class="history-empty">Study history is temporarily unavailable.</p>';
+  }
+}
+
+function filePreviewAttributes(file) {
+  return `data-preview-file data-preview-url="${escapeHtml(file.previewUrl || "")}" data-preview-text-url="${escapeHtml(file.previewTextUrl || "")}" data-download-url="${escapeHtml(file.downloadUrl || "")}" data-preview-type="${escapeHtml(file.contentType || file.content_type || "")}" data-preview-name="${escapeHtml(file.fileName || file.file_name || "Uploaded file")}"`;
+}
+
+function resetFilePreview() {
+  filePreviewImage.hidden = true;
+  filePreviewFrame.hidden = true;
+  filePreviewText.hidden = true;
+  filePreviewError.hidden = true;
+  filePreviewTruncated.hidden = true;
+  filePreviewImage.removeAttribute("src");
+  filePreviewFrame.removeAttribute("src");
+  filePreviewText.textContent = "";
+}
+
+async function openFilePreview(button) {
+  const requestId = ++filePreviewRequest;
+  resetFilePreview();
+  filePreviewTitle.textContent = button.dataset.previewName || "Uploaded file";
+  filePreviewDownload.href = button.dataset.downloadUrl || "#";
+  filePreviewDownload.hidden = !button.dataset.downloadUrl;
+  const contentType = (button.dataset.previewType || "").toLowerCase();
+  const previewUrl = button.dataset.previewUrl;
+  filePreviewDialog.showModal();
+  if (contentType.startsWith("image/")) {
+    filePreviewImage.src = previewUrl;
+    filePreviewImage.hidden = false;
+    return;
+  }
+  if (contentType === "application/pdf") {
+    filePreviewFrame.src = previewUrl;
+    filePreviewFrame.hidden = false;
+    return;
+  }
+  try {
+    const response = await fetch(button.dataset.previewTextUrl, { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (requestId !== filePreviewRequest) return;
+    if (!response.ok) throw new Error(result.error || "This file preview could not be loaded.");
+    filePreviewText.textContent = String(result.text || "");
+    filePreviewTruncated.hidden = !result.truncated;
+    filePreviewText.hidden = false;
+  } catch (error) {
+    if (requestId !== filePreviewRequest) return;
+    filePreviewError.textContent = error instanceof Error ? error.message : "This file preview could not be loaded.";
+    filePreviewError.hidden = false;
   }
 }
 
@@ -2256,7 +2316,10 @@ function renderSelectedFiles() {
   selectedFilesList.innerHTML = selectedStudyFiles.map((file, index) => `
     <li class="selected-file">
       <span>${escapeHtml(file.fileName)} · ${escapeHtml(file.status || "Ready")}</span>
-      <button type="button" data-remove-file="${index}" ${filesProcessing ? "disabled" : ""}>Remove</button>
+      <div class="selected-file-actions">
+        ${file.id ? `<button type="button" ${filePreviewAttributes(file)} ${filesProcessing ? "disabled" : ""}>Preview</button>` : ""}
+        <button type="button" data-remove-file="${index}" ${filesProcessing ? "disabled" : ""}>Remove</button>
+      </div>
     </li>`).join("");
   selectedFilesList.querySelectorAll("[data-remove-file]").forEach((button) => {
     button.addEventListener("click", () => removeSelectedFile(Number(button.dataset.removeFile)));
@@ -2476,6 +2539,7 @@ fileInput.addEventListener("change", async () => {
         uploaded = await uploadStudyFile(prepared);
         attachment.id = uploaded.file.id;
         attachment.fileName = uploaded.file.fileName;
+        Object.assign(attachment, uploaded.file);
         if (item.isImage) {
           Object.assign(attachment, await extractImageMaterial(prepared));
         } else if (item.isText) {
@@ -2719,6 +2783,20 @@ navLinks.forEach((link) =>
     }
   }),
 );
+
+document.addEventListener("click", (event) => {
+  const previewButton = event.target.closest("[data-preview-file]");
+  if (previewButton) openFilePreview(previewButton);
+});
+filePreviewImage.addEventListener("error", () => {
+  filePreviewImage.hidden = true;
+  filePreviewError.textContent = "This image preview could not be loaded. Download the file to open it.";
+  filePreviewError.hidden = false;
+});
+filePreviewDialog.addEventListener("close", () => {
+  filePreviewRequest += 1;
+  resetFilePreview();
+});
 
 const helpDialog = document.querySelector("#help-dialog");
 document.querySelector("#help-button").addEventListener("click", () => helpDialog.showModal());

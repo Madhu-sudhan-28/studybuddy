@@ -17,12 +17,17 @@ const userHistoryContent = document.querySelector("#user-history-content");
 const userHistoryError = document.querySelector("#user-history-error");
 const imagePreviewDialog = document.querySelector("#image-preview-dialog");
 const imagePreview = document.querySelector("#image-preview");
+const filePreviewFrame = document.querySelector("#file-preview-frame");
+const filePreviewText = document.querySelector("#file-preview-text");
+const filePreviewTruncated = document.querySelector("#file-preview-truncated");
 const imagePreviewTitle = document.querySelector("#image-preview-title");
 const imagePreviewError = document.querySelector("#image-preview-error");
+const imagePreviewDownload = document.querySelector("#image-preview-download");
 const userHistoryCache = new Map();
 const userHistoryFiles = new Map();
 const adminRefreshButton = document.querySelector("#admin-refresh");
 let selectedUserId = null;
+let filePreviewRequest = 0;
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
@@ -30,6 +35,10 @@ const dateText = (timestamp) => new Date(Number(timestamp) * 1000).toLocaleStrin
 const sizeText = (bytes) => `${(Number(bytes) / 1024 / 1024).toFixed(2)} MB`;
 const isImageFile = (file) => file.isImage === true ||
   (file.isImage !== false && String(file.content_type || file.contentType || "").startsWith("image/"));
+
+function previewAttributes(file) {
+  return `data-preview-file data-preview-url="${escapeHtml(file.previewUrl || "")}" data-preview-text-url="${escapeHtml(file.previewTextUrl || "")}" data-download-url="${escapeHtml(file.downloadUrl || "")}" data-preview-type="${escapeHtml(file.content_type || file.contentType || "")}" data-preview-name="${escapeHtml(file.file_name || file.fileName || "Uploaded file")}"`;
+}
 
 function showState(isAdmin) {
   loading.hidden = true;
@@ -67,15 +76,14 @@ function renderImages(images) {
   imagesContainer.innerHTML = images.length ? images.map((image) => `
     <article class="image-card">
       ${isImageFile(image)
-        ? `<button class="image-preview-button" type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}" aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
-        : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
+        ? `<button class="image-preview-button" type="button" ${previewAttributes(image)} aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
+        : `<button class="file-type-preview" type="button" ${previewAttributes(image)} aria-label="Preview ${escapeHtml(image.file_name)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</button>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>${escapeHtml(image.email)}</small>
         <small>${sizeText(image.file_size)} · expires ${dateText(image.expires_at)}</small>
         <div class="image-actions">
-          ${isImageFile(image) ? `<button type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}">Preview</button>` : ""}
-          <a href="${escapeHtml(image.downloadUrl)}">Download file</a>
+          <button type="button" ${previewAttributes(image)}>Preview</button>
           <button type="button" data-delete-image="${Number(image.id)}">Delete</button>
         </div>
       </div>
@@ -132,14 +140,13 @@ function renderHistoryImages(images) {
   return images.length ? `<div class="image-grid">${images.map((image) => `
     <article class="image-card">
       ${isImageFile(image)
-        ? `<button class="image-preview-button" type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}" aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
-        : `<div class="file-type-preview" aria-label="${escapeHtml(image.content_type)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</div>`}
+        ? `<button class="image-preview-button" type="button" ${previewAttributes(image)} aria-label="Preview ${escapeHtml(image.file_name)}"><img src="${escapeHtml(image.previewUrl)}" alt="" loading="lazy" /></button>`
+        : `<button class="file-type-preview" type="button" ${previewAttributes(image)} aria-label="Preview ${escapeHtml(image.file_name)}">${escapeHtml(image.file_name.split(".").pop().toUpperCase())}</button>`}
       <div class="image-card-body">
         <strong title="${escapeHtml(image.file_name)}">${escapeHtml(image.file_name)}</strong>
         <small>${sizeText(image.file_size)} · uploaded ${dateText(image.uploaded_at)} · expires ${dateText(image.expires_at)}</small>
         <div class="image-actions">
-          ${isImageFile(image) ? `<button type="button" data-preview-image="${escapeHtml(image.previewUrl)}" data-preview-name="${escapeHtml(image.file_name)}">Preview</button>` : ""}
-          <a href="${escapeHtml(image.downloadUrl)}">Download file</a>
+          <button type="button" ${previewAttributes(image)}>Preview</button>
         </div>
       </div>
     </article>`).join("")}</div>` : '<p class="empty">No retained files.</p>';
@@ -159,11 +166,11 @@ function renderUserHistory(result) {
         <div><h3>${escapeHtml(item.title)}</h3><small>${dateText(item.createdAt)}</small></div>
         <div class="history-record-actions">
           <button class="button secondary" type="button" data-view-plan="${Number(item.id)}">View saved plan</button>
-          ${images.some(isImageFile)
-            ? `<button class="plan-image-thumbnail" type="button" data-preview-image="${escapeHtml(images.find(isImageFile).previewUrl)}" data-preview-name="${escapeHtml(images.find(isImageFile).file_name)}" aria-label="Preview image uploaded for ${escapeHtml(item.title)}"><img src="${escapeHtml(images.find(isImageFile).previewUrl)}" alt="" loading="lazy" /></button>`
-            : images.length
-              ? `<span class="plan-image-file" aria-label="Plan has uploaded files">${images.length} file${images.length === 1 ? "" : "s"}</span>`
-              : '<span class="plan-image-missing">No saved files</span>'}
+          ${images.length
+            ? isImageFile(images.find(isImageFile) || images[0])
+              ? `<button class="plan-image-thumbnail" type="button" ${previewAttributes(images.find(isImageFile) || images[0])} aria-label="Preview file uploaded for ${escapeHtml(item.title)}"><img src="${escapeHtml((images.find(isImageFile) || images[0]).previewUrl)}" alt="" loading="lazy" /></button>`
+              : `<button class="plan-image-file" type="button" ${previewAttributes(images[0])}>Preview ${escapeHtml(images[0].file_name.split(".").pop().toUpperCase())}</button>`
+            : '<span class="plan-image-missing">No saved files</span>'}
         </div>
       </div>
       <div class="user-plan-details" data-plan-details="${Number(item.id)}" hidden></div>
@@ -187,12 +194,45 @@ function renderUserHistory(result) {
   });
 }
 
-function openImagePreview(button) {
-  imagePreviewTitle.textContent = button.dataset.previewName || "Uploaded image";
+function openFilePreview(button) {
+  const requestId = ++filePreviewRequest;
+  imagePreviewTitle.textContent = button.dataset.previewName || "Uploaded file";
   imagePreviewError.hidden = true;
-  imagePreview.hidden = false;
-  imagePreview.src = button.dataset.previewImage;
+  imagePreview.hidden = true;
+  filePreviewFrame.hidden = true;
+  filePreviewText.hidden = true;
+  filePreviewTruncated.hidden = true;
+  imagePreview.removeAttribute("src");
+  filePreviewFrame.removeAttribute("src");
+  filePreviewText.textContent = "";
+  imagePreviewDownload.href = button.dataset.downloadUrl || "#";
+  imagePreviewDownload.hidden = !button.dataset.downloadUrl;
   imagePreviewDialog.showModal();
+  const contentType = (button.dataset.previewType || "").toLowerCase();
+  if (contentType.startsWith("image/")) {
+    imagePreview.hidden = false;
+    imagePreview.src = button.dataset.previewUrl;
+    return;
+  }
+  if (contentType === "application/pdf") {
+    filePreviewFrame.hidden = false;
+    filePreviewFrame.src = button.dataset.previewUrl;
+    return;
+  }
+  fetch(button.dataset.previewTextUrl, { cache: "no-store" })
+    .then(async (response) => {
+      const result = await response.json().catch(() => ({}));
+      if (requestId !== filePreviewRequest) return;
+      if (!response.ok) throw new Error(result.error || "This file preview could not be loaded.");
+      filePreviewText.textContent = String(result.text || "");
+      filePreviewTruncated.hidden = !result.truncated;
+      filePreviewText.hidden = false;
+    })
+    .catch((error) => {
+      if (requestId !== filePreviewRequest) return;
+      imagePreviewError.textContent = error instanceof Error ? error.message : "This file preview could not be loaded.";
+      imagePreviewError.hidden = false;
+    });
 }
 
 async function loadUserHistory(userId, scrollToPanel = true) {
@@ -337,15 +377,18 @@ document.querySelector("#close-user-history").addEventListener("click", () => {
   selectedUserId = null;
 });
 dashboard.addEventListener("click", (event) => {
-  const previewButton = event.target.closest("[data-preview-image]");
-  if (previewButton) openImagePreview(previewButton);
+  const previewButton = event.target.closest("[data-preview-file]");
+  if (previewButton) openFilePreview(previewButton);
 });
 imagePreview.addEventListener("error", () => {
   imagePreview.hidden = true;
   imagePreviewError.hidden = false;
 });
 imagePreviewDialog.addEventListener("close", () => {
+  filePreviewRequest += 1;
   imagePreview.removeAttribute("src");
+  filePreviewFrame.removeAttribute("src");
+  filePreviewText.textContent = "";
 });
 
 api("/api/admin/session")
