@@ -1148,6 +1148,7 @@ function createPlan(material, schedule, topics = splitIntoTopics(material), inpu
   state.examDate = examDate;
   state.memoryStyle = "mixed";
   state.currentLesson = 0;
+  state.masteryCheckPage = false;
   state.completedLessons = new Set();
   state.masteryChecks = {};
   state.topicAssessment = {};

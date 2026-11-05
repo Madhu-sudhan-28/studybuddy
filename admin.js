@@ -22,7 +22,6 @@ const filePreviewText = document.querySelector("#file-preview-text");
 const filePreviewTruncated = document.querySelector("#file-preview-truncated");
 const imagePreviewTitle = document.querySelector("#image-preview-title");
 const imagePreviewError = document.querySelector("#image-preview-error");
-const imagePreviewDownload = document.querySelector("#image-preview-download");
 const userHistoryCache = new Map();
 const userHistoryFiles = new Map();
 const adminRefreshButton = document.querySelector("#admin-refresh");
@@ -37,7 +36,7 @@ const isImageFile = (file) => file.isImage === true ||
   (file.isImage !== false && String(file.content_type || file.contentType || "").startsWith("image/"));
 
 function previewAttributes(file) {
-  return `data-preview-file data-preview-url="${escapeHtml(file.previewUrl || "")}" data-preview-text-url="${escapeHtml(file.previewTextUrl || "")}" data-download-url="${escapeHtml(file.downloadUrl || "")}" data-preview-type="${escapeHtml(file.content_type || file.contentType || "")}" data-preview-name="${escapeHtml(file.file_name || file.fileName || "Uploaded file")}"`;
+  return `data-preview-file data-preview-url="${escapeHtml(file.previewUrl || "")}" data-preview-text-url="${escapeHtml(file.previewTextUrl || "")}" data-preview-type="${escapeHtml(file.content_type || file.contentType || "")}" data-preview-name="${escapeHtml(file.file_name || file.fileName || "Uploaded file")}"`;
 }
 
 function showState(isAdmin) {
@@ -205,8 +204,6 @@ function openFilePreview(button) {
   imagePreview.removeAttribute("src");
   filePreviewFrame.removeAttribute("src");
   filePreviewText.textContent = "";
-  imagePreviewDownload.href = button.dataset.downloadUrl || "#";
-  imagePreviewDownload.hidden = !button.dataset.downloadUrl;
   imagePreviewDialog.showModal();
   const contentType = (button.dataset.previewType || "").toLowerCase();
   if (contentType.startsWith("image/")) {
