@@ -466,10 +466,6 @@ function setAuthMode(mode = "login", preserveFields = false) {
   document.querySelector("#auth-divider").hidden = !credentialsMode;
   authError.classList.remove("auth-success");
   const registering = mode === "register";
-  const verifyingEmail = mode === "verify-email";
-  const resettingPassword = mode === "reset-password";
-  const usesCode = verifyingEmail || resettingPassword;
-  const usesPassword = registering || mode === "login" || resettingPassword;
   const emailInput = document.querySelector("#auth-email");
   const passwordInput = document.querySelector("#auth-password");
   const confirmPassword = document.querySelector("#auth-confirm-password");
@@ -480,58 +476,40 @@ function setAuthMode(mode = "login", preserveFields = false) {
     passwordInput.value = "";
     confirmPassword.value = "";
   }
-  if (!usesCode) document.querySelector("#auth-code").value = "";
   emailInput.autocomplete = registering ? "email" : "username";
-  emailInput.readOnly = usesCode;
   document.querySelector("#auth-title").innerHTML = ({
     login: 'Welcome <span class="serif-accent">back.</span>',
     register: 'Create your <span class="serif-accent">account.</span>',
-    "verify-email": 'Verify your <span class="serif-accent">email.</span>',
-    "forgot-password": 'Reset your <span class="serif-accent">password.</span>',
-    "reset-password": 'Choose a new <span class="serif-accent">password.</span>',
   })[mode];
   document.querySelector("#auth-copy").textContent = ({
     login: "Sign in with Google or your email and password.",
-    register: "We’ll email you a six-digit code to verify your address.",
-    "verify-email": "Enter the six-digit code we emailed you to finish creating your account.",
-    "forgot-password": "Enter your email and we’ll send a code if a verified account exists.",
-    "reset-password": "Enter the emailed code and choose a new password.",
+    register: "Create an account with your email and password.",
   })[mode];
   document.querySelector("#auth-submit").textContent = ({
     login: "Sign in",
     register: "Create account",
-    "verify-email": "Verify email",
-    "forgot-password": "Send reset code",
-    "reset-password": "Reset password",
   })[mode];
   document.querySelector("#auth-switch").hidden = !credentialsMode;
   document.querySelector("#auth-switch-prompt").textContent = registering ? "Already have an account?" : "New to StudyBuddy?";
   document.querySelector("#auth-toggle").textContent = registering ? "Sign in" : "Create an account";
-  document.querySelector("#auth-resend-code").hidden = !(verifyingEmail || resettingPassword);
-  document.querySelector("#auth-back-to-login").hidden = credentialsMode;
-  document.querySelector("#auth-code-field").hidden = !usesCode;
-  document.querySelector("#auth-code").required = usesCode;
-  document.querySelector("#auth-password-label").hidden = !usesPassword;
-  document.querySelector("#auth-password-wrap").hidden = !usesPassword;
-  passwordInput.autocomplete = registering || resettingPassword ? "new-password" : "current-password";
-  document.querySelector("#auth-password-hint").hidden = !registering && !resettingPassword;
-  passwordInput.minLength = registering || resettingPassword ? 8 : 0;
-  passwordInput.required = usesPassword;
+  document.querySelector("#auth-password-label").hidden = false;
+  document.querySelector("#auth-password-wrap").hidden = false;
+  passwordInput.autocomplete = registering ? "new-password" : "current-password";
+  document.querySelector("#auth-password-hint").hidden = !registering;
+  passwordInput.minLength = registering ? 8 : 0;
+  passwordInput.required = true;
   const confirmPasswordField = document.querySelector("#auth-confirm-password-field");
-  confirmPasswordField.hidden = !registering && !resettingPassword;
-  confirmPassword.required = registering || resettingPassword;
+  confirmPasswordField.hidden = !registering;
+  confirmPassword.required = registering;
   confirmPassword.minLength = 8;
-  document.querySelector("#auth-confirm-password-label").textContent = resettingPassword
-    ? "Confirm new password"
-    : "Confirm password";
-  passwordInput.pattern = registering || resettingPassword
+  document.querySelector("#auth-confirm-password-label").textContent = "Confirm password";
+  passwordInput.pattern = registering
     ? "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\\s]).{8,256}"
     : "";
-  passwordInput.title = registering || resettingPassword
+  passwordInput.title = registering
     ? "Use at least 8 characters with uppercase and lowercase letters, a number, and a symbol."
     : "";
-  if (!registering && !resettingPassword) confirmPassword.value = "";
-  if (!usesPassword) passwordInput.value = "";
+  if (!registering) confirmPassword.value = "";
   authError.textContent = "";
 }
 
@@ -2820,34 +2798,6 @@ authForm.querySelectorAll("[data-password-toggle]").forEach((toggle) => {
 document.querySelector("#auth-toggle").addEventListener("click", () => {
   setAuthMode(authMode === "login" ? "register" : "login");
 });
-document.querySelector("#auth-back-to-login").addEventListener("click", () => {
-  setAuthMode("login", true);
-});
-document.querySelector("#auth-resend-code").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  const status = document.querySelector("#auth-error");
-  status.textContent = "";
-  status.classList.remove("auth-success");
-  button.disabled = true;
-  try {
-    const endpoint = authMode === "verify-email"
-      ? "/api/auth/resend-verification"
-      : "/api/auth/forgot-password";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: document.querySelector("#auth-email").value.trim() }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-    status.textContent = result.message || "If the account is eligible, a new code has been sent.";
-    status.classList.add("auth-success");
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : FRIENDLY_ERROR;
-  } finally {
-    button.disabled = false;
-  }
-});
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authError.textContent = "";
@@ -2861,7 +2811,7 @@ authForm.addEventListener("submit", async (event) => {
     emailInput.focus();
     return;
   }
-  const passwordMode = authMode === "register" || authMode === "reset-password";
+  const passwordMode = authMode === "register";
   if (passwordMode && (
     password.length < 8
     || password.length > 256
@@ -2885,77 +2835,31 @@ authForm.addEventListener("submit", async (event) => {
     document.querySelector("#auth-confirm-password").focus();
     return;
   }
-  const code = document.querySelector("#auth-code").value.trim();
-  if ((authMode === "verify-email" || authMode === "reset-password") && !/^\d{6}$/.test(code)) {
-    authError.textContent = "Enter the six-digit code from your email.";
-    document.querySelector("#auth-code").focus();
-    return;
-  }
   const submit = document.querySelector("#auth-submit");
   submit.disabled = true;
   const originalText = submit.textContent;
   submit.textContent = ({
     login: "Signing in…",
     register: "Creating account…",
-    "verify-email": "Verifying email…",
-    "forgot-password": "Sending reset code…",
-    "reset-password": "Resetting password…",
   })[authMode];
   try {
     const endpoint = ({
       login: "/api/auth/login",
       register: "/api/auth/register",
-      "verify-email": "/api/auth/verify-email",
-      "forgot-password": "/api/auth/forgot-password",
-      "reset-password": "/api/auth/reset-password",
     })[authMode];
     const body = { email };
-    if (authMode === "login" || authMode === "register" || authMode === "reset-password") {
+    if (authMode === "login" || authMode === "register") {
       body.password = password;
     }
-    if (authMode === "verify-email" || authMode === "reset-password") body.code = code;
-    const submittedMode = authMode;
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const result = await response.json().catch(() => ({}));
-    if (submittedMode === "register" && result.verificationRequired) {
-      passwordInput.value = "";
-      document.querySelector("#auth-confirm-password").value = "";
-      setAuthMode("verify-email", true);
-      if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-      authError.textContent = result.message || "We sent a six-digit verification code to your email address.";
-      authError.classList.add("auth-success");
-      return;
-    }
-    if (submittedMode === "login" && result.verificationRequired) {
-      setAuthMode("verify-email", true);
-      throw new Error(result.error || "Verify your email address to finish creating your account.");
-    }
     if (!response.ok) throw new Error(result.error || FRIENDLY_ERROR);
-    if (submittedMode === "forgot-password") {
-      setAuthMode("reset-password", true);
-      authError.textContent = result.message;
-      authError.classList.add("auth-success");
-      return;
-    }
-    if (submittedMode === "reset-password") {
-      const savedEmail = email;
-      passwordInput.value = "";
-      document.querySelector("#auth-confirm-password").value = "";
-      document.querySelector("#auth-code").value = "";
-      setAuthMode("login", true);
-      emailInput.value = savedEmail;
-      authError.textContent = result.message || "Your password was reset. Sign in with your new password.";
-      authError.classList.add("auth-success");
-      return;
-    }
-    if (submittedMode === "register") return;
     document.querySelector("#auth-password").value = "";
     document.querySelector("#auth-confirm-password").value = "";
-    document.querySelector("#auth-code").value = "";
     const sessionResponse = await fetch("/api/auth/session", { cache: "no-store" });
     const session = await sessionResponse.json().catch(() => ({}));
     if (!sessionResponse.ok) throw new Error(session.error || FRIENDLY_ERROR);
@@ -2967,13 +2871,7 @@ authForm.addEventListener("submit", async (event) => {
       : FRIENDLY_ERROR;
   } finally {
     submit.disabled = false;
-    submit.textContent = authMode === "login" || authMode === "register"
-      ? originalText
-      : ({
-        "verify-email": "Verify email",
-        "forgot-password": "Send reset code",
-        "reset-password": "Reset password",
-      })[authMode];
+    submit.textContent = originalText;
   }
 });
 document.querySelector("#sign-out").addEventListener("click", async () => {

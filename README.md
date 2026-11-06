@@ -23,7 +23,7 @@ Learners can attach up to 10 files per plan, each up to 10 MB: PNG, JPEG, WebP, 
    DATABASE_URL=your-supabase-postgresql-uri
    ```
 
-2. The server requires `DATABASE_URL` and creates its tables in Supabase automatically on startup. Keep the URI private. Configure `BREVO_API_KEY` and `BREVO_FROM_EMAIL` before using email/password sign-up or password recovery. On Windows, double-click `start-studybuddy.bat`. It starts the server in the background without leaving a terminal window open and opens StudyBuddy in your browser. Users can register with verified email and password, or sign in with Google. Email/password passwords require at least 8 characters, including uppercase and lowercase letters, a number, and a symbol. To run it in a terminal for troubleshooting, use `python server.py` from this folder.
+2. The server requires `DATABASE_URL` and creates its tables in Supabase automatically on startup. Keep the URI private. On Windows, double-click `start-studybuddy.bat`. It starts the server in the background without leaving a terminal window open and opens StudyBuddy in your browser. Users can register with an email and password or sign in with Google. Email/password passwords require at least 8 characters, including uppercase and lowercase letters, a number, and a symbol. To run it in a terminal for troubleshooting, use `python server.py` from this folder.
 3. The background server stays available while you use StudyBuddy. To stop it, close the `pythonw.exe` process running `server.py` in Task Manager. If you add or change the key after starting, stop and restart the server.
 
 ### Share study history between local and deployed sites
@@ -38,7 +38,7 @@ The admin dashboard is available at `/admin`. Configure `STUDYBUDDY_ADMIN_PASSWO
 
 To let users sign in from anywhere, deploy the Python server to a public host, use HTTPS, set `STUDYBUDDY_HOST=0.0.0.0`, and let the host provide `PORT`. Configure `DATABASE_URL`, `GROQ_API_KEY`, and the Google OAuth variables below as private server environment variables; never put secrets in browser code.
 
-Email/password registration requires email verification. Password recovery sends a short-lived, six-digit code to the account email. Configure `BREVO_API_KEY` and `BREVO_FROM_EMAIL` in `.env` and as private Vercel environment variables; verify the sender address/domain in Brevo first. Resend remains supported via `RESEND_API_KEY` and `RESEND_FROM_EMAIL` if Brevo is not configured. Verification/reset codes expire after 15 minutes, allow five attempts, and can be reissued once per minute. Existing email/password accounts remain verified, and Google sign-in is unchanged. The database migration adds verification state with existing accounts marked verified.
+Email/password accounts sign in directly after registration. Password recovery by email is not available.
 
 StudyBuddy sends images and selected lesson excerpts to Groq for analysis and generation; review Groq's data and usage policies before uploading private material.
 
@@ -58,6 +58,6 @@ http://127.0.0.1:8000/api/auth/google/callback
 https://studybuddy-nine-rosy.vercel.app/api/auth/google/callback
 ```
 
-Copy `.env.example` to `.env`, then set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and the local `GOOGLE_REDIRECT_URI` there. For Vercel, add all three as server-side environment variables and set `GOOGLE_REDIRECT_URI` to `https://studybuddy-nine-rosy.vercel.app/api/auth/google/callback`. Redeploy after changing Vercel environment variables. Never put the client secret in frontend code, commit it, or share it. The callback validates Google's signed ID token, verified email, OAuth state, nonce, and PKCE challenge before creating a session. Google sign-in creates new accounts and continues to support existing Google accounts. It does not automatically link to an email/password account. Email/password accounts use Brevo (or optionally Resend) for verification and password recovery; configure the corresponding API key and verified sender as described above.
+Copy `.env.example` to `.env`, then set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and the local `GOOGLE_REDIRECT_URI` there. For Vercel, add all three as server-side environment variables and set `GOOGLE_REDIRECT_URI` to `https://studybuddy-nine-rosy.vercel.app/api/auth/google/callback`. Redeploy after changing Vercel environment variables. Never put the client secret in frontend code, commit it, or share it. The callback validates Google's signed ID token, verified email, OAuth state, nonce, and PKCE challenge before creating a session. Google sign-in creates new accounts and continues to support existing Google accounts. It does not automatically link to an email/password account.
 
 Supported images include PNG, JPEG, WebP, and GIF. Other formats are converted to JPEG in the browser when the browser can decode them. Text uploads and pasted notes continue to work without a Groq API key.
