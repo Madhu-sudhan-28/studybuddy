@@ -50,7 +50,8 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .auth-contact summary { min-height: 34px; display: flex; align-items: center; padding: 0 11px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; font-weight: 600; cursor: pointer; list-style: none; }
 .auth-contact summary::-webkit-details-marker { display: none; }
 .auth-contact summary:hover { border-color: #b9cbb9; background: #f0f4ee; }
-.auth-contact a { position: absolute; top: 42px; right: 0; padding: 10px 12px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; color: #40594a; box-shadow: 0 8px 24px #293d3314; white-space: nowrap; }
+.auth-contact-details { position: absolute; top: 42px; right: 0; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; box-shadow: 0 8px 24px #293d3314; white-space: nowrap; }
+.auth-contact-details a { color: #40594a; }
 .auth-contact a:focus-visible, .auth-contact summary:focus-visible { outline: 3px solid #94b9a1; outline-offset: 3px; }
 .auth-brand { margin: 0 0 3px; }
 .auth-card { width: min(100%, 430px); padding: 34px; border: 1px solid #e9ebe4; border-radius: 15px; background: #fffefa; box-shadow: 0 18px 55px #293d330d; }

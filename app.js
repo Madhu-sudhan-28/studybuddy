@@ -2906,6 +2906,16 @@ document.querySelector("#contact-copy").addEventListener("click", async (event) 
     status.textContent = "Could not copy. Select the email to copy it.";
   }
 });
+document.querySelector("#auth-contact-copy").addEventListener("click", async () => {
+  const status = document.querySelector("#auth-contact-copy-status");
+  try {
+    await navigator.clipboard.writeText("mca111725039126@gmail.com");
+    status.textContent = "Copied!";
+  } catch (error) {
+    console.error("Could not copy the contact email.", error);
+    status.textContent = "Could not copy. Select the email to copy it.";
+  }
+});
 window.addEventListener("pagehide", () => {
   if (!signedIn || !state.material) return;
   const snapshot = progressSnapshot();
