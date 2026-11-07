@@ -1885,7 +1885,9 @@ class StudyBuddyHandler(SimpleHTTPRequestHandler):
                     send_json(self, 401, {"error": "No account was found for that email. Check the address or create an account."})
                     return
                 if user["is_disabled"]:
-                    send_json(self, 403, {"error": "This account has been disabled. Contact StudyBuddy support."})
+                    send_json(self, 403, {
+                        "error": "Your account has been disabled. Please contact us at mca111725039126@gmail.com for assistance."
+                    })
                     return
                 if not verify_password(password, user["password_hash"]):
                     send_json(self, 401, {"error": "Incorrect password. Please enter the correct password and try again."})
