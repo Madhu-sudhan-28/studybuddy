@@ -45,7 +45,13 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .note-link { position: relative; z-index: 1; color: #35634a; font-size: 11.5px; font-weight: 700; }
 .note-link span { margin-left: 4px; }
 .note-decoration { position: absolute; right: -17px; bottom: -39px; width: 111px; height: 111px; border: 1px solid #dce4d6; border-radius: 50%; box-shadow: 0 0 0 12px #f0f2e9, 0 0 0 13px #dce4d6, 0 0 0 26px #f0f2e9, 0 0 0 27px #dce4d6; }
-.auth-gate { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 20px; padding: 32px 18px; background: radial-gradient(ellipse at 50% 0%, #edf2e9 0, #f7f7f2 62%); }
+.auth-gate { position: relative; min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 20px; padding: 68px 18px 32px; background: radial-gradient(ellipse at 50% 0%, #edf2e9 0, #f7f7f2 62%); }
+.auth-contact { position: absolute; top: 22px; right: 28px; z-index: 2; color: #40594a; font-size: 12.5px; }
+.auth-contact summary { min-height: 34px; display: flex; align-items: center; padding: 0 11px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; font-weight: 600; cursor: pointer; list-style: none; }
+.auth-contact summary::-webkit-details-marker { display: none; }
+.auth-contact summary:hover { border-color: #b9cbb9; background: #f0f4ee; }
+.auth-contact a { position: absolute; top: 42px; right: 0; padding: 10px 12px; border: 1px solid #dfe5dc; border-radius: 7px; background: #fffefa; color: #40594a; box-shadow: 0 8px 24px #293d3314; white-space: nowrap; }
+.auth-contact a:focus-visible, .auth-contact summary:focus-visible { outline: 3px solid #94b9a1; outline-offset: 3px; }
 .auth-brand { margin: 0 0 3px; }
 .auth-card { width: min(100%, 430px); padding: 34px; border: 1px solid #e9ebe4; border-radius: 15px; background: #fffefa; box-shadow: 0 18px 55px #293d330d; }
 .auth-card .eyebrow { margin-bottom: 16px; }
